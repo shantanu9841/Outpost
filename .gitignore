@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local database (local state, not source)
+outpost.db
+outpost.db-journal
+outpost.db-wal
+outpost.db-shm
+
+# Secrets / environment
+.env
+.env.*
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

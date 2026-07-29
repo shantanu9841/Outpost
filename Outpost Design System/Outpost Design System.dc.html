@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+:root{
+ --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,Roboto,sans-serif;
+ --mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+ --r-sm:4px; --r:6px; --r-lg:8px;
+ --row-pad:10px 14px;
+ --bg:#FAFAFA; --bg-subtle:#F4F4F5; --surface:#FFFFFF; --surface-hover:#F7F7F8;
+ --border:#E4E4E7; --border-strong:#D4D4D8;
+ --text:#18181B; --text-2:#52525B; --text-3:#A1A1AA;
+ --accent:#4F46E5; --accent-hover:#4338CA; --accent-fg:#FFFFFF; --accent-subtle:#EEF2FF; --accent-border:#C7D2FE; --ring:rgba(79,70,229,.35);
+ --success:#16A34A; --success-subtle:#DCFCE7;
+ --warning:#D97706; --warning-subtle:#FEF3C7;
+ --error:#DC2626; --error-subtle:#FEE2E2;
+ --info:#2563EB; --info-subtle:#DBEAFE;
+ --pl-queued:#64748B; --pl-queued-bg:#F1F5F9;
+ --pl-contacted:#2563EB; --pl-contacted-bg:#DBEAFE;
+ --pl-replied:#7C3AED; --pl-replied-bg:#EDE9FE;
+ --pl-live:#16A34A; --pl-live-bg:#DCFCE7;
+ --pl-declined:#E11D48; --pl-declined-bg:#FFE4E6;
+ --shadow:0 1px 2px rgba(24,24,27,.04),0 1px 3px rgba(24,24,27,.06);
+}
+[data-theme="dark"]{
+ --bg:#09090B; --bg-subtle:#131316; --surface:#18181B; --surface-hover:#232327;
+ --border:#27272A; --border-strong:#3F3F46;
+ --text:#FAFAFA; --text-2:#A1A1AA; --text-3:#71717A;
+ --accent:#6366F1; --accent-hover:#818CF8; --accent-fg:#FFFFFF; --accent-subtle:#1E1B4B; --accent-border:#3730A3; --ring:rgba(99,102,241,.4);
+ --success:#22C55E; --success-subtle:#14261B;
+ --warning:#F59E0B; --warning-subtle:#2A2110;
+ --error:#EF4444; --error-subtle:#2A1516;
+ --info:#3B82F6; --info-subtle:#16233A;
+ --pl-queued:#94A3B8; --pl-queued-bg:#1E2530;
+ --pl-contacted:#60A5FA; --pl-contacted-bg:#16233A;
+ --pl-replied:#A78BFA; --pl-replied-bg:#241C3A;
+ --pl-live:#4ADE80; --pl-live-bg:#14261B;
+ --pl-declined:#FB7185; --pl-declined-bg:#2E1519;
+ --shadow:0 1px 2px rgba(0,0,0,.4),0 1px 3px rgba(0,0,0,.3);
+}
+[data-accent="blue"]{--accent:#2563EB;--accent-hover:#1D4ED8;--accent-subtle:#DBEAFE;--accent-border:#BFDBFE;--ring:rgba(37,99,235,.35);}
+[data-accent="blue"][data-theme="dark"]{--accent:#3B82F6;--accent-hover:#60A5FA;--accent-subtle:#172554;--accent-border:#1E40AF;--ring:rgba(59,130,246,.4);}
+[data-accent="violet"]{--accent:#7C3AED;--accent-hover:#6D28D9;--accent-subtle:#EDE9FE;--accent-border:#DDD6FE;--ring:rgba(124,58,237,.35);}
+[data-accent="violet"][data-theme="dark"]{--accent:#8B5CF6;--accent-hover:#A78BFA;--accent-subtle:#2E1065;--accent-border:#5B21B6;--ring:rgba(139,92,246,.4);}
+[data-density="compact"]{--row-pad:6px 14px;}
+*{box-sizing:border-box;}
+body{margin:0;}
+a{color:var(--accent);text-decoration:none;}
+a:hover{color:var(--accent-hover);}
+input::placeholder,textarea::placeholder{color:var(--text-3);}
+</style>
+</helmet>
+
+<div data-theme="{{ themeAttr }}" data-density="{{ densityAttr }}" data-accent="{{ accentAttr }}" style="min-height:100vh;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased">
+
+  <header style="position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border)">
+    <div style="max-width:1120px;margin:0 auto;padding:14px 32px;display:flex;align-items:center;justify-content:space-between;gap:16px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="width:26px;height:26px;border-radius:7px;background:var(--accent);display:flex;align-items:center;justify-content:center">
+          <div style="width:9px;height:9px;border-radius:2px;background:var(--accent-fg)"></div>
+        </div>
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <span style="font-size:15px;font-weight:600;letter-spacing:-.01em">Outpost</span>
+          <span style="font-size:13px;color:var(--text-3)">Design System</span>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">v1.0</span>
+        <button onClick="{{ toggle }}" style="display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:var(--r);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font:inherit;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:var(--surface-hover)">{{ toggleLabel }}</button>
+      </div>
+    </div>
+  </header>
+
+  <main style="max-width:1120px;margin:0 auto;padding:44px 32px 120px;display:flex;flex-direction:column;gap:16px">
+
+    <div style="display:flex;flex-direction:column;gap:14px;max-width:680px">
+      <h1 style="margin:0;font-size:30px;font-weight:600;letter-spacing:-.02em">A command center for outreach.</h1>
+      <p style="margin:0;font-size:15px;color:var(--text-2);line-height:1.6;text-wrap:pretty">Outpost is a dense internal tool people live in for hours. This system trades decoration for clarity: quiet neutrals, one confident accent, semantic color only where it carries meaning, and type tuned for tables. Toggle the theme in the header — every component below responds live.</p>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:8px">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Restraint</div>
+          <div style="font-size:12px;color:var(--text-2);line-height:1.5">Color is a signal, not a texture.</div>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Density</div>
+          <div style="font-size:12px;color:var(--text-2);line-height:1.5">More rows visible, less scrolling.</div>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Trust</div>
+          <div style="font-size:12px;color:var(--text-2);line-height:1.5">Evidence and scores read at a glance.</div>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:14px">
+          <div style="font-size:13px;font-weight:600;margin-bottom:3px">Low strain</div>
+          <div style="font-size:12px;color:var(--text-2);line-height:1.5">Soft contrast, dark mode as a peer.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 01 COLOR -->
+    <section style="display:flex;flex-direction:column;gap:20px;border-top:1px solid var(--border);padding-top:28px;margin-top:28px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--text-3)">01 · COLOR</span>
+        <h2 style="margin:0;font-size:20px;font-weight:600;letter-spacing:-.01em">Palette</h2>
+        <p style="margin:0;color:var(--text-2);font-size:14px;max-width:640px">Every token ships in both themes. Neutrals are cool and near-desaturated; the accent is the only branded hue; semantic and pipeline colors are reserved strictly for status.</p>
+      </div>
+
+      <sc-for list="{{ colorGroups }}" as="grp" hint-placeholder-count="5">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden">
+          <div style="display:grid;grid-template-columns:1fr 148px 148px;gap:16px;padding:11px 16px;background:var(--bg-subtle);border-bottom:1px solid var(--border)">
+            <span style="font-size:12px;font-weight:600;letter-spacing:.02em;color:var(--text)">{{ grp.group }}</span>
+            <span style="font-size:11px;font-weight:500;letter-spacing:.06em;color:var(--text-3)">LIGHT</span>
+            <span style="font-size:11px;font-weight:500;letter-spacing:.06em;color:var(--text-3)">DARK</span>
+          </div>
+          <sc-for list="{{ grp.tokens }}" as="t" hint-placeholder-count="5">
+            <div style="display:grid;grid-template-columns:1fr 148px 148px;gap:16px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--border)">
+              <div style="display:flex;flex-direction:column;gap:1px;min-width:0">
+                <span style="font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--text)">{{ t.name }}</span>
+                <span style="font-size:12px;color:var(--text-2)">{{ t.usage }}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:9px">
+                <div style="{{ t.lightStyle }}"></div>
+                <span style="font-family:var(--mono);font-size:12px;color:var(--text-2)">{{ t.light }}</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:9px">
+                <div style="{{ t.darkStyle }}"></div>
+                <span style="font-family:var(--mono);font-size:12px;color:var(--text-2)">{{ t.dark }}</span>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </sc-for>
+    </section>
+
+    <!-- 02 TYPE -->
+    <section style="display:flex;flex-direction:column;gap:20px;border-top:1px solid var(--border);padding-top:28px;margin-top:28px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--text-3)">02 · TYPOGRAPHY</span>
+        <h2 style="margin:0;font-size:20px;font-weight:600;letter-spacing:-.01em">Type scale</h2>
+        <p style="margin:0;color:var(--text-2);font-size:14px;max-width:640px">One family: the native system UI stack (San Francisco / Segoe / Roboto) for zero load and perfect legibility, plus a monospace stack for scores, IDs, and tabular numbers. Weights limited to 400 / 500 / 600.</p>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:8px 20px">
+        <sc-for list="{{ typeScale }}" as="t" hint-placeholder-count="7">
+          <div style="display:grid;grid-template-columns:1fr 260px;gap:24px;align-items:baseline;padding:16px 0;border-bottom:1px solid var(--border)">
+            <div style="{{ t.style }}">{{ t.sample }}</div>
+            <div style="display:flex;flex-direction:column;gap:2px">
+              <span style="font-size:13px;font-weight:600;color:var(--text)">{{ t.name }}</span>
+              <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">{{ t.specs }}</span>
+              <span style="font-size:12px;color:var(--text-2);line-height:1.45">{{ t.usage }}</span>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- 03 SPACING -->
+    <section style="display:flex;flex-direction:column;gap:20px;border-top:1px solid var(--border);padding-top:28px;margin-top:28px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--text-3)">03 · SPACING &amp; LAYOUT</span>
+        <h2 style="margin:0;font-size:20px;font-weight:600;letter-spacing:-.01em">Rhythm</h2>
+        <p style="margin:0;color:var(--text-2);font-size:14px;max-width:640px">Base unit is <strong style="color:var(--text);font-weight:600">4px</strong>. Compose all padding, gaps, and sizes from the scale below so density stays predictable across screens.</p>
+      </div>
+      <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:16px;align-items:start">
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px 20px;display:flex;flex-direction:column;gap:12px">
+          <sc-for list="{{ spacing }}" as="s" hint-placeholder-count="10">
+            <div style="display:flex;align-items:center;gap:14px">
+              <span style="font-family:var(--mono);font-size:12px;color:var(--text);width:44px">{{ s.px }}</span>
+              <span style="font-family:var(--mono);font-size:12px;color:var(--text-3);width:34px">{{ s.mult }}</span>
+              <div style="{{ s.barStyle }}"></div>
+              <span style="font-size:12px;color:var(--text-2)">{{ s.use }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px 20px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:12px">Corner radius</div>
+            <div style="display:flex;gap:16px;align-items:flex-end">
+              <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:52px;height:52px;background:var(--accent-subtle);border:1px solid var(--accent-border);border-radius:4px"></div><span style="font-family:var(--mono);font-size:11px;color:var(--text-3)">4px badges</span></div>
+              <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:52px;height:52px;background:var(--accent-subtle);border:1px solid var(--accent-border);border-radius:6px"></div><span style="font-family:var(--mono);font-size:11px;color:var(--text-3)">6px controls</span></div>
+              <div style="display:flex;flex-direction:column;gap:6px;align-items:center"><div style="width:52px;height:52px;background:var(--accent-subtle);border:1px solid var(--accent-border);border-radius:8px"></div><span style="font-family:var(--mono);font-size:11px;color:var(--text-3)">8px cards</span></div>
+            </div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:18px 20px">
+            <div style="font-size:13px;font-weight:600;margin-bottom:4px">Table density</div>
+            <div style="font-size:12px;color:var(--text-2);line-height:1.5">Comfortable rows are <strong style="color:var(--text);font-weight:600">40px</strong> (10px vertical padding); compact drops to <strong style="color:var(--text);font-weight:600">32px</strong> (6px) for triage views. Card padding: 16px compact, 20px default. Page gutters: 32px.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 04 COMPONENTS -->
+    <section style="display:flex;flex-direction:column;gap:20px;border-top:1px solid var(--border);padding-top:28px;margin-top:28px">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--text-3)">04 · COMPONENTS</span>
+        <h2 style="margin:0;font-size:20px;font-weight:600;letter-spacing:-.01em">Building blocks</h2>
+        <p style="margin:0;color:var(--text-2);font-size:14px;max-width:640px">The pieces this app leans on, rendered live. Hover the interactive ones.</p>
+      </div>
+
+      <!-- Buttons -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:22px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:16px">Buttons</div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center">
+          <button style="display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:var(--r);border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font:inherit;font-size:13px;font-weight:600;cursor:pointer" style-hover="background:var(--accent-hover);border-color:var(--accent-hover)">Approve &amp; send</button>
+          <button style="display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:var(--r);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font:inherit;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:var(--surface-hover);border-color:var(--text-3)">Edit draft</button>
+          <button style="display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 12px;border-radius:var(--r);border:1px solid transparent;background:transparent;color:var(--text-2);font:inherit;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:var(--surface-hover);color:var(--text)">Skip</button>
+          <button style="display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:var(--r);border:1px solid var(--error);background:var(--error);color:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer" style-hover="filter:brightness(.93)">Reject</button>
+          <button disabled style="display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:var(--r);border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font:inherit;font-size:13px;font-weight:600;opacity:.45;cursor:not-allowed">Disabled</button>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:14px">
+          <button style="display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:var(--r);border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg);font:inherit;font-size:12px;font-weight:600;cursor:pointer" style-hover="background:var(--accent-hover)">Small primary</button>
+          <button style="display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:var(--r);border:1px solid var(--border-strong);background:var(--surface);color:var(--text);font:inherit;font-size:12px;font-weight:500;cursor:pointer" style-hover="background:var(--surface-hover)">Small secondary</button>
+          <span style="font-family:var(--mono);font-size:11px;color:var(--text-3);margin-left:4px">34px default · 28px small</span>
+        </div>
+      </div>
+
+      <!-- Badges -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:22px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">Status badges</div>
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:16px">Approval states — subtle tint + saturated text, one dot.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:22px">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--success);background:var(--success-subtle)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Approved</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--warning);background:var(--warning-subtle)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Needs review</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--error);background:var(--error-subtle)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Rejected</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--info);background:var(--info-subtle)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Auto-drafted</span>
+        </div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:6px">Pipeline pills</div>
+        <div style="font-size:12px;color:var(--text-2);margin-bottom:16px">The stage vocabulary, used identically in the table and on the board.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--pl-queued);background:var(--pl-queued-bg)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Queued</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--pl-contacted);background:var(--pl-contacted-bg)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Contacted</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--pl-replied);background:var(--pl-replied-bg)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Replied</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--pl-live);background:var(--pl-live-bg)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Live</span>
+          <span style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:9999px;font-size:11px;font-weight:600;color:var(--pl-declined);background:var(--pl-declined-bg)"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>Declined</span>
+        </div>
+      </div>
+
+      <!-- Inputs -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:22px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:16px">Inputs</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 24px;max-width:720px">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label style="font-size:12px;font-weight:500;color:var(--text-2)">Campaign name</label>
+            <input value="Spring seed-starter kit" style="height:34px;width:100%;padding:0 11px;border:1px solid var(--border-strong);border-radius:var(--r);background:var(--surface);color:var(--text);font:inherit;font-size:13px;outline:none" style-focus="border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)" />
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label style="font-size:12px;font-weight:500;color:var(--text-2)">Search prospects</label>
+            <div style="position:relative;display:flex;align-items:center">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" style="position:absolute;left:10px;color:var(--text-3)"><circle cx="7" cy="7" r="4.5" /><line x1="10.5" y1="10.5" x2="14" y2="14" /></svg>
+              <input placeholder="Filter by platform, region…" style="height:34px;width:100%;padding:0 11px 0 32px;border:1px solid var(--border-strong);border-radius:var(--r);background:var(--surface);color:var(--text);font:inherit;font-size:13px;outline:none" style-focus="border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)" />
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label style="font-size:12px;font-weight:500;color:var(--text-2)">Channel</label>
+            <select style="height:34px;width:100%;padding:0 11px;border:1px solid var(--border-strong);border-radius:var(--r);background:var(--surface);color:var(--text);font:inherit;font-size:13px;outline:none;cursor:pointer" style-focus="border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)">
+              <option>Instagram</option><option>TikTok</option><option>YouTube</option>
+            </select>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label style="font-size:12px;font-weight:500;color:var(--text-2)">Min. fit score</label>
+            <input value="not-a-number" style="height:34px;width:100%;padding:0 11px;border:1px solid var(--error);border-radius:var(--r);background:var(--surface);color:var(--text);font:inherit;font-size:13px;outline:none" style-focus="box-shadow:0 0 0 3px var(--error-subtle)" />
+            <span style="font-size:12px;color:var(--error)">Enter a value between 0 and 100.</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;grid-column:1 / -1">
+            <label style="font-size:12px;font-weight:500;color:var(--text-2)">Outreach note</label>
+            <textarea style="min-height:74px;width:100%;padding:9px 11px;border:1px solid var(--border-strong);border-radius:var(--r);background:var(--surface);color:var(--text);font:inherit;font-size:13px;line-height:1.5;outline:none;resize:vertical" style-focus="border-color:var(--accent);box-shadow:0 0 0 3px var(--ring)">Loved your balcony seed-starting series — we make a compact spring kit that fits exactly that audience.</textarea>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label style="font-size:12px;font-weight:500;color:var(--text-3)">Owner (locked)</label>
+            <input value="assigned to system" disabled style="height:34px;width:100%;padding:0 11px;border:1px solid var(--border);border-radius:var(--r);background:var(--bg-subtle);color:var(--text-3);font:inherit;font-size:13px;cursor:not-allowed" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden">
+        <div style="padding:16px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-size:14px;font-weight:600">Discovery results</div>
+            <div style="font-size:12px;color:var(--text-2);margin-top:1px">Found creators &amp; companies, scored for fit</div>
+          </div>
+          <span style="font-family:var(--mono);font-size:12px;color:var(--text-3)">214 prospects</span>
+        </div>
+        <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead>
+            <tr style="background:var(--bg-subtle)">
+              <th style="text-align:left;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">PROSPECT</th>
+              <th style="text-align:left;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">TYPE</th>
+              <th style="text-align:left;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">PLATFORM</th>
+              <th style="text-align:right;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">FIT</th>
+              <th style="text-align:right;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">REACH</th>
+              <th style="text-align:left;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">SIGNAL</th>
+              <th style="text-align:left;padding:8px 14px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--text-3);border-bottom:1px solid var(--border)">STAGE</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{ tableRows }}" as="r" hint-placeholder-count="6">
+              <tr style="border-bottom:1px solid var(--border)" style-hover="background:var(--surface-hover)">
+                <td style="padding:var(--row-pad)">
+                  <div style="display:flex;flex-direction:column;gap:1px">
+                    <span style="font-weight:600;color:var(--text)">{{ r.name }}</span>
+                    <span style="font-size:12px;color:var(--text-2)">{{ r.sub }}</span>
+                  </div>
+                </td>
+                <td style="padding:var(--row-pad);color:var(--text-2)">{{ r.type }}</td>
+                <td style="padding:var(--row-pad);color:var(--text-2)">{{ r.platform }}</td>
+                <td style="padding:var(--row-pad);text-align:right"><span style="{{ r.fitStyle }}">{{ r.fit }}</span></td>
+                <td style="padding:var(--row-pad);text-align:right;font-family:var(--mono);color:var(--text-2)">{{ r.reach }}</td>
+                <td style="padding:var(--row-pad);color:var(--text-2);max-width:280px">{{ r.evidence }}</td>
+                <td style="padding:var(--row-pad)"><span style="{{ r.pillStyle }}"><span style="width:6px;height:6px;border-radius:9999px;background:currentColor"></span>{{ r.stageLabel }}</span></td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <!-- Side nav -->
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:20px;align-items:start">
+        <div style="width:248px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:12px;display:flex;flex-direction:column;gap:2px">
+          <div style="display:flex;align-items:center;gap:10px;padding:6px 10px 12px">
+            <div style="width:24px;height:24px;border-radius:6px;background:var(--accent);display:flex;align-items:center;justify-content:center"><div style="width:8px;height:8px;border-radius:2px;background:var(--accent-fg)"></div></div>
+            <span style="font-size:14px;font-weight:600">Outpost</span>
+          </div>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);color:var(--text-2);font-size:13px;font-weight:500" style-hover="background:var(--surface-hover);color:var(--text)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="5" rx="1" /><rect x="9" y="2" width="5" height="5" rx="1" /><rect x="2" y="9" width="5" height="5" rx="1" /><rect x="9" y="9" width="5" height="5" rx="1" /></svg>
+            <span>Dashboard</span>
+          </a>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);color:var(--text-2);font-size:13px;font-weight:500" style-hover="background:var(--surface-hover);color:var(--text)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="7" cy="7" r="4.5" /><line x1="10.5" y1="10.5" x2="14" y2="14" /></svg>
+            <span>Discovery</span>
+            <span style="margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:500;color:var(--text-3);background:var(--bg-subtle);padding:1px 7px;border-radius:9999px">214</span>
+          </a>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);background:var(--accent-subtle);color:var(--accent);font-size:13px;font-weight:600">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 8.5 6.5 12 13 4" /></svg>
+            <span>Approvals</span>
+            <span style="margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent-fg);background:var(--accent);padding:1px 7px;border-radius:9999px">18</span>
+          </a>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);color:var(--text-2);font-size:13px;font-weight:500" style-hover="background:var(--surface-hover);color:var(--text)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="3.2" height="10" rx="1" /><rect x="6.4" y="3" width="3.2" height="7" rx="1" /><rect x="10.8" y="3" width="3.2" height="11" rx="1" /></svg>
+            <span>Pipeline</span>
+          </a>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);color:var(--text-2);font-size:13px;font-weight:500" style-hover="background:var(--surface-hover);color:var(--text)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="2" width="10" height="12" rx="1.5" /><line x1="5.5" y1="6" x2="10.5" y2="6" /><line x1="5.5" y1="9" x2="10.5" y2="9" /></svg>
+            <span>Campaigns</span>
+          </a>
+          <div style="height:1px;background:var(--border);margin:8px 2px"></div>
+          <a style="display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border-radius:var(--r);color:var(--text-2);font-size:13px;font-weight:500" style-hover="background:var(--surface-hover);color:var(--text)">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><line x1="3" y1="5" x2="13" y2="5" /><line x1="3" y1="11" x2="13" y2="11" /><circle cx="6" cy="5" r="1.9" fill="var(--surface)" /><circle cx="10" cy="11" r="1.9" fill="var(--surface)" /></svg>
+            <span>Settings</span>
+          </a>
+          <div style="display:flex;align-items:center;gap:9px;padding:10px;margin-top:6px;border-top:1px solid var(--border)">
+            <div style="width:26px;height:26px;border-radius:9999px;background:var(--bg-subtle);border:1px solid var(--border);flex:none"></div>
+            <div style="display:flex;flex-direction:column;min-width:0">
+              <span style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Ada Whitfield</span>
+              <span style="font-size:11px;color:var(--text-3)">Growth · Acme Seeds</span>
+            </div>
+          </div>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:20px;height:100%;display:flex;flex-direction:column;justify-content:center;gap:8px">
+          <div style="font-size:13px;font-weight:600">Side navigation</div>
+          <div style="font-size:12px;color:var(--text-2);line-height:1.6;max-width:420px;text-wrap:pretty">Fixed 248px rail. The active item carries the accent tint plus accent text — no heavy fills. Counts live as quiet mono pills; the active count inverts to solid accent so the approval backlog always draws the eye. Everything else stays neutral until hover.</div>
+        </div>
+      </div>
+
+    </section>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+ &quot;$preview&quot;: { &quot;width&quot;: 1200, &quot;height&quot;: 940 },
+ &quot;theme&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;light&quot;, &quot;options&quot;: [&quot;light&quot;, &quot;dark&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Display&quot; },
+ &quot;density&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;comfortable&quot;, &quot;options&quot;: [&quot;comfortable&quot;, &quot;compact&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Display&quot; },
+ &quot;accent&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;default&quot;: &quot;indigo&quot;, &quot;options&quot;: [&quot;indigo&quot;, &quot;blue&quot;, &quot;violet&quot;], &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Display&quot; }
+}">
+class Component extends DCLogic {
+  state = { theme: null };
+  toggle = () => {
+    const cur = this.state.theme ?? this.props.theme ?? 'light';
+    this.setState({ theme: cur === 'dark' ? 'light' : 'dark' });
+  };
+  renderVals() {
+    const theme = this.state.theme ?? this.props.theme ?? 'light';
+    const isDark = theme === 'dark';
+    const density = this.props.density ?? 'comfortable';
+    const accent = this.props.accent ?? 'indigo';
+
+    const chip = { width: '22px', height: '22px', borderRadius: '5px', border: '1px solid rgba(120,120,130,.28)', flex: 'none' };
+    const colorGroups = [
+      { group: 'Neutrals & surfaces', tokens: [
+        { name: 'bg', usage: 'App background', light: '#FAFAFA', dark: '#09090B' },
+        { name: 'bg-subtle', usage: 'Sunken areas, table header', light: '#F4F4F5', dark: '#131316' },
+        { name: 'surface', usage: 'Cards, panels, rows', light: '#FFFFFF', dark: '#18181B' },
+        { name: 'surface-hover', usage: 'Row / item hover', light: '#F7F7F8', dark: '#232327' },
+        { name: 'border', usage: 'Default hairline borders', light: '#E4E4E7', dark: '#27272A' },
+        { name: 'border-strong', usage: 'Inputs, dividers, emphasis', light: '#D4D4D8', dark: '#3F3F46' },
+      ]},
+      { group: 'Text', tokens: [
+        { name: 'text', usage: 'Primary text, headings', light: '#18181B', dark: '#FAFAFA' },
+        { name: 'text-2', usage: 'Secondary, labels, meta', light: '#52525B', dark: '#A1A1AA' },
+        { name: 'text-3', usage: 'Muted, placeholders', light: '#A1A1AA', dark: '#71717A' },
+      ]},
+      { group: 'Accent · primary action', tokens: [
+        { name: 'accent', usage: 'Primary buttons, active nav, links', light: '#4F46E5', dark: '#6366F1' },
+        { name: 'accent-hover', usage: 'Hover / pressed', light: '#4338CA', dark: '#818CF8' },
+        { name: 'accent-subtle', usage: 'Selected background, tints', light: '#EEF2FF', dark: '#1E1B4B' },
+        { name: 'accent-border', usage: 'Focused / selected border', light: '#C7D2FE', dark: '#3730A3' },
+      ]},
+      { group: 'Semantic', tokens: [
+        { name: 'success', usage: 'Approved, healthy', light: '#16A34A', dark: '#22C55E' },
+        { name: 'warning', usage: 'Needs attention', light: '#D97706', dark: '#F59E0B' },
+        { name: 'error', usage: 'Rejected, failed, destructive', light: '#DC2626', dark: '#EF4444' },
+        { name: 'info', usage: 'Neutral info, auto-drafted', light: '#2563EB', dark: '#3B82F6' },
+      ]},
+      { group: 'Pipeline stages', tokens: [
+        { name: 'queued', usage: 'Discovered, not yet contacted', light: '#64748B', dark: '#94A3B8' },
+        { name: 'contacted', usage: 'Outreach sent', light: '#2563EB', dark: '#60A5FA' },
+        { name: 'replied', usage: 'Prospect responded', light: '#7C3AED', dark: '#A78BFA' },
+        { name: 'live', usage: 'Deal / collab active', light: '#16A34A', dark: '#4ADE80' },
+        { name: 'declined', usage: 'Passed / lost', light: '#E11D48', dark: '#FB7185' },
+      ]},
+    ];
+    colorGroups.forEach(g => g.tokens.forEach(t => {
+      t.lightStyle = { ...chip, background: t.light };
+      t.darkStyle = { ...chip, background: t.dark };
+    }));
+
+    const typeScale = [
+      { name: 'Page title', size: '24px', weight: 600, lh: '32px', usage: 'Screen H1, one per view', sample: 'Active campaigns' },
+      { name: 'Section', size: '20px', weight: 600, lh: '28px', usage: 'Panel & card-group headings', sample: 'Discovery results' },
+      { name: 'Subsection', size: '16px', weight: 600, lh: '24px', usage: 'Card titles, dialog headers', sample: 'Draft outreach — @lensandloam' },
+      { name: 'Body', size: '14px', weight: 400, lh: '20px', usage: 'Default UI text, form values', sample: 'Reached out about the spring seed-starter kit.' },
+      { name: 'Table', size: '13px', weight: 400, lh: '18px', usage: 'Dense table cells & lists', sample: 'lensandloam · 128K followers · Portland, OR' },
+      { name: 'Label', size: '12px', weight: 500, lh: '16px', usage: 'Field labels, column headers', sample: 'FIT SCORE', ls: '.04em' },
+      { name: 'Micro', size: '11px', weight: 500, lh: '14px', usage: 'Badges, timestamps, counts', sample: '2h ago · v1.0' },
+    ].map(t => ({
+      ...t,
+      specs: `${t.size} · ${t.weight} · ${t.lh}`,
+      style: { fontSize: t.size, fontWeight: t.weight, lineHeight: t.lh, letterSpacing: t.ls || '-.01em', color: 'var(--text)', fontFamily: t.name === 'Label' ? 'var(--sans)' : 'var(--sans)' },
+    }));
+
+    const base = 4;
+    const useMap = { 4: 'Icon/text gap, chip padding', 8: 'Compact gaps, badge padding', 12: 'Control padding, list gaps', 16: 'Card padding (compact), field gaps', 20: 'Card padding (default)', 24: 'Section inner gaps', 32: 'Page gutters, panel padding', 40: 'Between subsections', 48: 'Between major blocks', 64: 'Between top-level sections' };
+    const spacing = [4, 8, 12, 16, 20, 24, 32, 40, 48, 64].map(v => ({
+      px: v + 'px', mult: (v / base) + '×', use: useMap[v],
+      barStyle: { width: v + 'px', height: '14px', background: 'var(--accent)', borderRadius: '3px', flex: 'none' },
+    }));
+
+    const pill = (s) => ({ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '3px 10px', borderRadius: '9999px', fontSize: '11px', fontWeight: 600, lineHeight: '16px', whiteSpace: 'nowrap', color: `var(--pl-${s})`, background: `var(--pl-${s}-bg)` });
+    const fitColor = (f) => f >= 85 ? 'var(--success)' : f >= 70 ? 'var(--text)' : 'var(--text-3)';
+    const tableRows = [
+      { name: 'lensandloam', sub: '@lensandloam · Portland, OR', type: 'Creator', platform: 'Instagram', fit: 92, reach: '128K', evidence: '3 recent posts on seed-starting; 4.1% engagement.', stage: 'contacted', stageLabel: 'Contacted' },
+      { name: 'the urban potager', sub: '@urbanpotager · balcony veg', type: 'Creator', platform: 'TikTok', fit: 88, reach: '240K', evidence: 'High save-rate how-tos; audience skews 25–34.', stage: 'replied', stageLabel: 'Replied' },
+      { name: 'Greenleaf Distro', sub: 'Wholesale · 40 indie brands', type: 'Distributor', platform: '—', fit: 84, reach: '—', evidence: 'Stocks comparable garden SKUs across the PNW.', stage: 'queued', stageLabel: 'Queued' },
+      { name: 'moss & fern', sub: '@mossandfern · grow-with-me', type: 'Creator', platform: 'YouTube', fit: 79, reach: '61K', evidence: 'Weekly series; strong comment purchase-intent.', stage: 'live', stageLabel: 'Live' },
+      { name: 'PacNW Logistics', sub: 'Cold-chain · PNW coverage', type: 'Logistics', platform: '—', fit: 71, reach: '—', evidence: 'Fits perishable seed-kit shipping requirements.', stage: 'queued', stageLabel: 'Queued' },
+      { name: 'backyard botanist', sub: '@bkbotanist · houseplants', type: 'Creator', platform: 'Instagram', fit: 64, reach: '44K', evidence: 'Audience skews decor, not edible gardening.', stage: 'declined', stageLabel: 'Declined' },
+    ].map(r => ({ ...r, pillStyle: pill(r.stage), fitStyle: { fontFamily: 'var(--mono)', fontSize: '13px', fontWeight: 700, color: fitColor(r.fit) } }));
+
+    return {
+      themeAttr: theme, densityAttr: density, accentAttr: accent, isDark,
+      toggleLabel: isDark ? 'Light mode' : 'Dark mode', toggle: this.toggle,
+      colorGroups, typeScale, spacing, tableRows,
+    };
+  }
+}
+</script>
+</body>
+</html>

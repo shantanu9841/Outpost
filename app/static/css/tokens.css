@@ -1,0 +1,125 @@
+/* Outpost design tokens — the single source of truth for color, type, spacing.
+   Transcribed from design.md. Light lives in :root; dark overrides under
+   :root[data-theme="dark"]. Do not hardcode values elsewhere — use var(--token). */
+
+:root {
+  /* Neutrals & surfaces */
+  --bg: #FAFAFA;
+  --bg-subtle: #F4F4F5;
+  --surface: #FFFFFF;
+  --surface-hover: #F7F7F8;
+  --border: #E4E4E7;
+  --border-strong: #D4D4D8;
+
+  /* Text */
+  --text: #18181B;
+  --text-2: #52525B;
+  --text-3: #A1A1AA;
+
+  /* Accent (indigo) */
+  --accent: #4F46E5;
+  --accent-hover: #4338CA;
+  --accent-fg: #FFFFFF;
+  --accent-subtle: #EEF2FF;
+  --accent-border: #C7D2FE;
+  --ring: rgba(79, 70, 229, 0.35);
+
+  /* Semantic */
+  --success: #16A34A;
+  --success-subtle: #DCFCE7;
+  --warning: #D97706;
+  --warning-subtle: #FEF3C7;
+  --error: #DC2626;
+  --error-subtle: #FEE2E2;
+  --info: #2563EB;
+  --info-subtle: #DBEAFE;
+
+  /* Pipeline stages */
+  --pl-queued: #64748B;
+  --pl-queued-subtle: #F1F5F9;
+  --pl-contacted: #2563EB;
+  --pl-contacted-subtle: #DBEAFE;
+  --pl-replied: #7C3AED;
+  --pl-replied-subtle: #EDE9FE;
+  --pl-live: #16A34A;
+  --pl-live-subtle: #DCFCE7;
+  --pl-declined: #E11D48;
+  --pl-declined-subtle: #FFE4E6;
+
+  /* Elevation */
+  --shadow: 0 1px 2px rgba(24, 24, 27, 0.04), 0 1px 3px rgba(24, 24, 27, 0.06);
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* Radius */
+  --radius-badge: 4px;
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --radius-pill: 9999px;
+
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Layout */
+  --rail-width: 248px;
+  --gutter: 32px;
+}
+
+:root[data-theme="dark"] {
+  /* Neutrals & surfaces */
+  --bg: #09090B;
+  --bg-subtle: #131316;
+  --surface: #18181B;
+  --surface-hover: #232327;
+  --border: #27272A;
+  --border-strong: #3F3F46;
+
+  /* Text */
+  --text: #FAFAFA;
+  --text-2: #A1A1AA;
+  --text-3: #71717A;
+
+  /* Accent (indigo) */
+  --accent: #6366F1;
+  --accent-hover: #818CF8;
+  --accent-fg: #FFFFFF;
+  --accent-subtle: #1E1B4B;
+  --accent-border: #3730A3;
+  --ring: rgba(99, 102, 241, 0.4);
+
+  /* Semantic */
+  --success: #22C55E;
+  --success-subtle: #14261B;
+  --warning: #F59E0B;
+  --warning-subtle: #2A2110;
+  --error: #EF4444;
+  --error-subtle: #2A1516;
+  --info: #3B82F6;
+  --info-subtle: #16233A;
+
+  /* Pipeline stages */
+  --pl-queued: #94A3B8;
+  --pl-queued-subtle: #1E2530;
+  --pl-contacted: #60A5FA;
+  --pl-contacted-subtle: #16233A;
+  --pl-replied: #A78BFA;
+  --pl-replied-subtle: #241C3A;
+  --pl-live: #4ADE80;
+  --pl-live-subtle: #14261B;
+  --pl-declined: #FB7185;
+  --pl-declined-subtle: #2E1519;
+
+  /* Elevation — heavier alpha in dark */
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.5);
+}

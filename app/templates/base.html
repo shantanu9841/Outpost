@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Outpost{% endblock %}</title>
+
+    <!-- Apply saved/preferred theme before paint to avoid a flash of the wrong theme. -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("outpost-theme");
+          var prefersDark =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (saved === "dark" || (!saved && prefersDark)) {
+            document.documentElement.setAttribute("data-theme", "dark");
+          }
+        } catch (e) {}
+      })();
+    </script>
+
+    <link rel="stylesheet" href="/static/css/tokens.css" />
+    <link rel="stylesheet" href="/static/css/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail">
+        <div class="rail__brand">
+          <span class="rail__mark" aria-hidden="true"></span>
+          Outpost
+        </div>
+        <nav class="rail__nav">
+          <a class="rail__item rail__item--active" href="/">Home</a>
+        </nav>
+      </aside>
+
+      <div class="main">
+        <header class="topbar">
+          <span class="topbar__title">{% block topbar %}Home{% endblock %}</span>
+          <button id="theme-toggle" class="btn btn--secondary" type="button">
+            ◐ Dark
+          </button>
+        </header>
+
+        <main class="content">{% block content %}{% endblock %}</main>
+      </div>
+    </div>
+
+    <script src="/static/js/theme.js"></script>
+  </body>
+</html>
