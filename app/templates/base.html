@@ -30,8 +30,25 @@
           <span class="rail__mark" aria-hidden="true"></span>
           Outpost
         </div>
+
+        {% if workspace %}
+        <div class="workspace-switcher">
+          <form method="post" action="/workspaces/switch" class="workspace-switcher__form">
+            <select name="workspace_id" class="select" onchange="this.form.submit()">
+              {% for w in workspaces %}
+              <option value="{{ w.id }}" {% if w.id == workspace.id %}selected{% endif %}>{{ w.name }}</option>
+              {% endfor %}
+            </select>
+          </form>
+          <a class="workspace-switcher__new" href="/workspaces/new">+ New workspace</a>
+        </div>
+        {% endif %}
+
         <nav class="rail__nav">
-          <a class="rail__item rail__item--active" href="/">Home</a>
+          <a class="rail__item {% if request.url.path == '/' %}rail__item--active{% endif %}" href="/">Home</a>
+          {% if workspace %}
+          <a class="rail__item {% if request.url.path == '/settings' %}rail__item--active{% endif %}" href="/settings">Settings</a>
+          {% endif %}
         </nav>
       </aside>
 

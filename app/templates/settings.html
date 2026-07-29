@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Settings — Outpost{% endblock %}
+{% block topbar %}Settings{% endblock %}
+
+{% set key_labels = {
+  "youtube": "YouTube Data API",
+  "apify": "Apify",
+  "apollo": "Apollo",
+  "llm": "LLM (paid tier)"
+} %}
+{% set key_hints = {
+  "youtube": "Optional. Raises the free search quota. Demo mode works without it.",
+  "apify": "Required to discover Instagram and TikTok creators. Off until a key is present.",
+  "apollo": "Required to discover businesses (distributors, logistics).",
+  "llm": "Optional. Falls back to the free Gemini tier when empty."
+} %}
+
+{% block content %}
+<section class="settings">
+  <h1 class="settings__title">Settings — {{ workspace.name }}</h1>
+  <p class="settings__body">
+    Keys you paste here are used only for this workspace and are never sent anywhere but the
+    provider they belong to. Every paid source stays off until its key is present.
+  </p>
+
+  <form method="post" action="/settings" class="settings__grid">
+    {% for key_name in setting_keys %}
+    <div class="key-card">
+      <div class="key-card__header">
+        <span class="key-card__label">{{ key_labels[key_name] }}</span>
+        {% if key_name in masked %}
+        <span class="badge badge--success">Saved</span>
+        {% else %}
+        <span class="badge badge--muted">Not set</span>
+        {% endif %}
+      </div>
+      <p class="key-card__hint">{{ key_hints[key_name] }}</p>
+      <input
+        class="input"
+        type="text"
+        name="{{ key_name }}"
+        placeholder="{% if key_name in masked %}{{ masked[key_name] }}{% else %}Paste your {{ key_labels[key_name] }} key{% endif %}"
+        autocomplete="off"
+      />
+      {% if key_name in masked %}
+      <button
+        class="btn btn--ghost btn--small key-card__remove"
+        type="submit"
+        formaction="/settings/delete/{{ key_name }}"
+      >
+        Remove
+      </button>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <button class="btn btn--primary" type="submit">Save keys</button>
+  </form>
+</section>
+{% endblock %}

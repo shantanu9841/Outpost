@@ -76,3 +76,21 @@ Rejected: Building the UI ad hoc. Incoherent result.
 Decision: The plan and rules live as permanent files (CLAUDE.md, SPEC.md, DECISIONS.md, PROGRESS.md, design.md) that Claude Code reads each session, rather than a one-off prompt.
 Why: Files are the persistent memory system and stay token-efficient across weeks. A prompt is spent the moment it runs and adds a translation layer the owner cannot scrutinize.
 Rejected: A single paste-in setup prompt. Throwaway, and drifts from the spec unseen.
+
+## Tenant isolation via explicit workspace_id parameter, not middleware
+*2026-07-29*
+Decision: Every function in app/db.py that reads or writes tenant data takes workspace_id as a required parameter, and every SQL statement inside it filters by it. No request-scoped middleware auto-injects the tenant id, and there is no global/ambient "current workspace" state on the server side.
+Why: Forgetting to pass workspace_id is a TypeError at call time, caught immediately during development, instead of a silent cross-tenant data leak discovered later. It's also the simplest pattern to read and audit — a non-engineer can see the isolation boundary in every function signature.
+Rejected: Middleware or a context-local variable that injects workspace_id automatically. Convenient, but the isolation guarantee becomes invisible at the call site and easy to bypass by accident.
+
+## Active workspace tracked via cookie, not accounts
+*2026-07-29*
+Decision: Outpost has no login/authentication. The active workspace is tracked in a plain cookie (workspace_id), resolved per-request by a get_current_workspace dependency that falls back to the most recently created workspace if the cookie is missing or stale.
+Why: This is a local, single-owner tool (SPEC.md), not a multi-user SaaS — the workspace is the tenant, not a logged-in user. A cookie is the simplest thing that lets "create and switch between workspaces" work without inventing an auth system out of scope for this build.
+Rejected: A user-accounts/login system. Out of scope for a local single-owner tool and adds real complexity for no product benefit at this stage.
+
+## New dependency: python-multipart
+*2026-07-29*
+Decision: Added python-multipart to requirements.txt.
+Why: FastAPI requires it to parse HTML form submissions (Form(...) parameters), which Slice 1's workspace-create and settings-save routes use. Server-rendered HTML with plain form posts (per the stack decision) needs this to read the posted fields at all.
+Rejected: Nothing rejected — this is a required transitive dependency for the chosen stack, not a design choice with alternatives.

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}New workspace — Outpost{% endblock %}
+{% block topbar %}New workspace{% endblock %}
+
+{% block content %}
+<section class="form-card">
+  <h1 class="form-card__title">
+    {% if workspace %}Create a workspace{% else %}Welcome to Outpost{% endif %}
+  </h1>
+  <p class="form-card__body">
+    {% if workspace %}
+    Each workspace keeps its own targets, drafts, and BYO-keys isolated from every other workspace.
+    {% else %}
+    Create your first workspace to get started. Each business gets its own isolated workspace.
+    {% endif %}
+  </p>
+  <form method="post" action="/workspaces" class="form-card__form">
+    <label class="label" for="name">Workspace name</label>
+    <input class="input" type="text" id="name" name="name" placeholder="e.g. Acme Wellness Co." required autofocus />
+    <button class="btn btn--primary" type="submit">Create workspace</button>
+  </form>
+</section>
+{% endblock %}
