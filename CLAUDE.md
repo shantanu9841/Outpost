@@ -42,3 +42,16 @@ Follow @design.md exactly. Use its tokens as CSS custom properties. Do not inven
 - Keep it simple and readable. This project is maintained by a non-technical owner reading with your help. Prefer clear names and short functions over clever code.
 - Comment the why, not the what, and only where it is not obvious.
 - No new dependency unless necessary. If you add one, note it in DECISIONS.md.
+
+## Model selection (ask before every slice)
+Before starting any slice, recommend which model I should run and wait
+for me to switch before proceeding. Principle: use the stronger reasoning
+model for planning and architectural judgment; use the faster model for
+mechanical execution from an approved plan. State the recommendation as
+the first line of every slice, name the current best-fit models by their
+in-app names, give a one-line reason, and stop until I confirm the switch.
+
+## Local data
+Never reset or delete outpost.db, seed files, or any local state on your
+own. If unexpected data is present, inspect it, back it up, and ask.
+Local data is the user's, not the agent's.
