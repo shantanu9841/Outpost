@@ -123,3 +123,65 @@ or coding sessions. It complements, but does not replace:
 - Known limitations: The Slice 2 plan corrections remain pending.
 - Next action: Wait for owner direction on the Slice 2 plan review and
   implementation sequence.
+
+## 2026-07-30 — Slice 2 plan corrected and committed as SLICE_2_PLAN.md
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 2 (B2B discovery via Apollo) — planning only
+- Role: Planner
+- Implementation status: Not started
+- Changes and corrections: Created `SLICE_2_PLAN.md` on `main` from the
+  complete Slice 2 Plan v2, incorporating all twelve owner-approved SDE 2
+  corrections: one shared `SourceResult` contract for every source (no
+  `list[Candidate]`-in-one-place-and-a-result-object-elsewhere split);
+  explicit fallback semantics in `discover()` that preserve the original
+  Apollo failure status/reason when substituting seed data; a fourth intake
+  status (`GEMINI_ERROR`) so `INVALID_GEMINI_KEY` is reserved strictly for a
+  rejected credential; a zero-Gemini country-extraction heuristic recognizing
+  US/UK/Germany aliases; a final `audit` schema that includes `campaign_id`
+  from the start, with `list_audit` querying it directly instead of a
+  creation-time window; a corrected `POST /campaigns` sequence that creates
+  the campaign (and its `campaign_id`) before any audit write; explicit
+  hand-written status→action→banner maps (not `f"discovery.{status.value}"`);
+  a 16px (`var(--space-4)`)-gapped two-banner stack using only existing
+  info/warning tokens; a specified, deletable, DB-write-free verification
+  script for invalid-credential paths instead of pasting fake keys through
+  the UI; a computed-style-first, two-screenshot-max verification approach;
+  "reuse"/"adapt" wording in place of "cherry-pick"; and a renamed,
+  correctly-counted 17-file (not 13) review of every `slice-2-scratch`
+  change. Also, per the instruction to read the finished file once for
+  internal contradictions before committing, found and fixed six issues:
+  two stale section cross-references left over from restructuring, one
+  incomplete citation of collaboration.md's own rule 9, a real design gap
+  where the described banner-rendering helpers took a live result object
+  that `campaign_detail` (which only has persisted `action`/`detail`
+  strings from `list_audit`) can't actually supply — resolved by adding an
+  explicit action-string-keyed reverse lookup — and two type-annotation
+  mismatches in the status-map code samples.
+- Files or areas affected: `SLICE_2_PLAN.md` (new), `collaboration.md` (this
+  entry). No application code, templates, styles, scripts, or dependency
+  files were touched.
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of a full end-to-end read of the finished plan
+  file specifically checking for internal contradictions (see corrections
+  above) before staging the commit, and a `git status` check confirming
+  only the two intended files were staged.
+- Last known working state: `main` unchanged except for these two files;
+  the application itself remains at the Slice 1 state — Slice 2 has not
+  been implemented. A prior partial SDE 2 draft of `SLICE_2_PLAN.md` on
+  `codex/sde-2-slice-2` was left untouched and unread, preserved via
+  `git stash` on that branch (stash entry: "SDE2 partial SLICE_2_PLAN.md
+  draft (preserved, not used, not read)").
+- Known limitations: The plan's Apollo 401→`INVALID_KEY` mapping and
+  Gemini's assumed 400/`INVALID_ARGUMENT`-with-"API key"-message or
+  403→`INVALID_KEY` error shape are design assumptions, not yet confirmed
+  against the live APIs (only Apollo's 403→insufficient-plan case has been
+  confirmed live, in an earlier session). The plan requires the §14.1
+  verification script to confirm or correct these before the mapping is
+  relied on elsewhere in the implementation.
+- Next action: Owner confirms this corrected plan has no further
+  outstanding changes. Once confirmed, per collaboration.md rule 6, SDE 2
+  (or SDE 1) may begin implementation — starting with the §14.1 isolated
+  verification script to confirm the Apollo/Gemini error-shape assumptions
+  live before wiring the rest of the route/audit/banner behavior around
+  them.
