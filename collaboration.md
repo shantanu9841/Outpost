@@ -273,3 +273,51 @@ or coding sessions. It complements, but does not replace:
 - Next action: Slice 3 (fit-scoring with citations), per SPEC.md §6 and
   PROGRESS.md. Model recommendation for that slice's planning is still
   owed to the owner before implementation begins, per CLAUDE.md.
+
+## 2026-07-30 — Slice 3 plan created as SLICE_3_PLAN.md (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 3 (fit-scoring with citations) — planning only
+- Role: Planner
+- Implementation status: Not started
+- Changes and corrections: Created `SLICE_3_PLAN.md` on `main`. Planning
+  was done on the stronger reasoning model (Opus); the plan recommends
+  Sonnet for execution and asks the owner to confirm the switch at the top
+  of implementation. Two design forks were put to the owner and decided
+  before the plan was written: (1) fit-scoring runs at discovery time
+  (extending Slice 2's create_campaign sequence with a scoring step, so the
+  detail page stays a pure read and each target is scored exactly once,
+  honoring the memory non-negotiable); (2) one deliberately weak seed
+  company is added to `seeds/companies.json` so the "weak target scores
+  low" done-when is demonstrable on the zero-key demo path, not only with a
+  live LLM — this changes the US seed count from 6 to 7. The plan reuses the
+  Slice 2 patterns deliberately: the citation requirement is enforced by the
+  Pydantic schema itself (FitReason requires a non-empty citation,
+  FitAssessment requires >=1 reason, so no code path stores an uncited
+  score); a deterministic heuristic scorer keeps the zero-key path scoring
+  with honest, cited reasoning; ScoreStatus reuses the four-way
+  rejected-credential-vs-other-failure split from intake; and a third
+  explicit SCORING_MAP is added to audit_banners rather than interpolating
+  enum values. The `target` table already has `fit_score`/`fit_reasons_json`
+  from Slice 2's schema, so no migration is required. One simplification is
+  flagged for owner awareness: scoring reads `candidate.raw` (identical to
+  what `Source.evidence()` returns for both current sources today) rather
+  than holding a live Source object, with a comment that Slice 5 wires
+  `source.evidence()` if creator evidence diverges.
+- Files or areas affected: `SLICE_3_PLAN.md` (new), `collaboration.md`
+  (this entry). No application code, templates, styles, seeds, or
+  dependency files were touched.
+- Verification: Documentation-only change; no app code was written or run.
+- Last known working state: `main` at the Slice 2 completion state; the
+  application is unchanged. Only these two files differ.
+- Known limitations: The heuristic scorer is a demo-mode stand-in, not a
+  real fit model; it exists so the zero-key flow completes with cited
+  reasoning. The at-discovery-time scoring's latency is bounded in practice
+  (free Apollo -> <=10 seed rows; no-key -> instant heuristic), but a paid
+  Apollo plan plus a live Gemini key would score up to 25 rows sequentially
+  — a cost/latency cost that Slice 6's routing and early-exit address, out
+  of scope here.
+- Next action: Owner confirms this plan has no further outstanding changes.
+  Once confirmed, per collaboration.md rule 6, implementation may begin on
+  Sonnet — starting with the models.py schema and scoring.py, then the
+  route/DB/audit/UI wiring, then the §11 verification.
