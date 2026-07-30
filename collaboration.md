@@ -695,3 +695,69 @@ or coding sessions. It complements, but does not replace:
   merged, Slice 4 (drafting, approval queue, pipeline) is next — model
   recommendation and plan review are still owed before that implementation
   begins, per CLAUDE.md.
+
+## 2026-07-31 — Slice 4 plan created as SLICE_4_PLAN.md (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 4 (drafting, approval queue, pipeline) — planning only
+- Role: Planner
+- Implementation status: Not started
+- Changes and corrections: Created `SLICE_4_PLAN.md`. Planning was done on the
+  stronger reasoning model (Opus 4.8, model switch confirmed by the owner
+  before planning began); the plan recommends Sonnet for execution and asks
+  the owner to confirm the switch at the top of implementation. Grounded the
+  plan against the actual committed code first: confirmed no `draft` or `eval`
+  table exists yet (Slice 4 adds only `draft`), that the `target.stage` and
+  `audit.target_id`/`audit.draft_id` columns were already provisioned in Slice
+  2's schema (so no migration to those tables is needed), and that the
+  `--pl-*` pipeline-stage design tokens already exist in `tokens.css` for both
+  themes (so the board needs no token additions). Per SPEC.md §6's instruction
+  to apply the `beautiful-prose` and `humanizer` skills to the drafting
+  prompt, both skills were loaded during planning and the drafting SYSTEM_PROMPT
+  was authored in the plan itself (§4.2) rather than deferred to execution —
+  the one genuinely writing-heavy part of the slice, kept on the strong model.
+  The plan defines two separate state machines (draft status:
+  pending/edited/approved/rejected; target stage:
+  queued/contacted/replied/live/declined) with an explicit gate — approving a
+  draft is what admits its target to the pipeline board — and reuses the
+  Slice 2/3 patterns throughout: a status-carrying `DraftResult` mirroring
+  intake/scoring, a deterministic zero-key heuristic that references the
+  target's stored Slice-3 grounded citations (so demo mode completes and
+  "references the cited evidence" holds by construction), the four-way
+  credential-vs-error status split, structured output validated with retry,
+  explicit audit action strings (no enum-string interpolation), and
+  workspace-scoped DB functions. Six interpretive decisions are listed in §12
+  for owner veto before implementation (chief among them: board membership =
+  an approved draft; Approvals/Pipeline as workspace-level nav pages; buttons
+  not drag; a light "name the company" personalization gate as the
+  prose-suitable analog of Slice 3's exact-value grounding; `cost_tokens`
+  created but left NULL until Slice 6; drafts generated on demand per selected
+  target). A full read of the finished plan confirmed internal consistency
+  (section cross-references, the files-changed list matching the body, and the
+  non-negotiables mapping in §9).
+- Files or areas affected: `SLICE_4_PLAN.md` (new) and this `collaboration.md`
+  entry. No application code, templates, styles, seeds, or dependency files
+  were touched — this is a planning-only change.
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of reading the actual committed Slice 2/3 code the
+  plan builds on (`app/db.py` schema, `app/models.py`, `app/agent/scoring.py`,
+  `app/main.py`, `app/audit_banners.py`, `app/templates/base.html` +
+  `campaigns_list.html` + `campaign_detail.html`, `app/static/css/tokens.css`)
+  to ground every "what already exists" claim, plus a `grep` confirming the
+  `draft`/`eval` tables are absent and the `--pl-*` tokens are present.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `b48ee4a` before this commit. `SLICE_4_PLAN.md` is the only content that
+  changed; the application itself remains at the Slice 3 (hardened) state —
+  Slice 4 has not been implemented.
+- Known limitations: The drafting prompt's real-world quality can only be
+  judged against a live model — the plan flags a required live-Gemini
+  verification step (§11.2) that a mocked test cannot substitute for. The
+  personalization gate is deliberately lighter than Slice 3's grounding
+  (prose can't be reliably value-checked); this is documented as a conscious
+  trade-off, not an oversight.
+- Next action: Owner confirms the plan has no further outstanding changes.
+  Per collaboration.md rule 6, implementation may then begin on Sonnet
+  (after the owner confirms the model switch, per CLAUDE.md) — starting with
+  `app/models.py` (`OutreachDraft`) and `app/agent/drafting.py`, then the
+  `draft` table + DB functions, then the routes/nav/UI, then the retained
+  tests in §11.1, then the §11.2 no-key and live-Gemini verification.
