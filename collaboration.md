@@ -321,3 +321,101 @@ or coding sessions. It complements, but does not replace:
   Once confirmed, per collaboration.md rule 6, implementation may begin on
   Sonnet — starting with the models.py schema and scoring.py, then the
   route/DB/audit/UI wiring, then the §11 verification.
+
+## 2026-07-30 — Slice 2 hardening follow-up: redaction and UTF-8 safeguards
+
+- Contributor/environment: SDE 2 / Codex desktop
+- Slice: Slice 2 hardening
+- Role: Implementer / Reviewer
+- Implementation status: Incomplete
+- Changes and corrections: Extended SDE 1's uncommitted hardening work only
+  in the two owner-approved areas: Apollo and Gemini provider-message
+  sanitizers now redact an echoed credential before audit/UI use;
+  `SeedSource` now reads UTF-8 explicitly and converts decoding failures
+  into `SEED_ERROR`. Added focused retained regressions for both providers
+  echoing fake keys and malformed UTF-8 seed bytes.
+- Files or areas affected: `app/sources/apollo.py`, `app/llm.py`,
+  `app/sources/seed.py`, `tests/test_slice2_hardening.py`, and
+  `collaboration.md`. All other hardening files remain SDE 1's existing
+  uncommitted work.
+- Verification: `python -m unittest tests.test_slice2_hardening -v` — 32
+  tests passed in 0.799s. No real provider calls, keys, or `outpost.db`
+  writes.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `7cf28bd`. Slice 2 hardening remains uncommitted. All retained tests pass.
+- Known limitations: Live verification with a newly rotated Gemini key is
+  still pending. `PROGRESS.md` and `DECISIONS.md` have not yet been updated.
+  A non-blocking Starlette `TestClient`/httpx deprecation warning remains.
+- Next action: SDE 1 resumes on this branch, verifies the diff, performs live
+  verification only with a newly rotated key saved through Settings, updates
+  `PROGRESS.md`, `DECISIONS.md`, and `collaboration.md` as needed, reruns
+  tests, commits the complete hardening work, confirms a clean tree, and
+  stops before Slice 3.
+
+## 2026-07-30 — Slice 2 hardening completed: live verification, model fix, commit
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 2 hardening (branch `codex/sde-1-slice-2-hardening`)
+- Role: Implementer / Reviewer
+- Implementation status: Complete
+- Changes and corrections: Resumed the branch left by SDE 2 (HEAD `7cf28bd`,
+  8 corrections 1–7 already applied plus SDE 2's two owner-approved
+  additions — echoed-credential redaction in `apollo._safe_reason`/
+  `llm._safe_gemini_reason`, and UTF-8-safe seed reads). Reviewed SDE 2's
+  diff and the extended 32-test suite; re-ran it clean before proceeding.
+  Performed the owner's live-verification step (correction 8): started the
+  app, asked the owner to paste a newly rotated Gemini key through the
+  Settings page only (the key posted earlier in chat was treated as
+  compromised and never used, read, or typed by this session), located the
+  saved key by workspace/length/timestamp only (`SELECT ... length(key_value)
+  ...`, never the value), and ran one real business campaign against it. The
+  first live call surfaced a genuine finding the plan anticipated: Gemini
+  rejected `gemini-2.5-flash` with "no longer available to new users."
+  Per the hardening instructions' explicit stop condition, implementation
+  paused and asked the owner before touching the model; current
+  ai.google.dev/gemini-api/docs/models documentation was checked, the owner
+  approved switching to `gemini-3.6-flash`, and live verification was
+  re-run — confirming `intake.llm_ok`, a correctly LLM-parsed Brief
+  (cleanly split product/audience/niche, not the heuristic's raw-text
+  truncation), the key masked in Settings (`••••` + last 4 chars, same as
+  Slice 1/2 behavior), and no key value anywhere in console output, audit
+  `detail`, tracked files, `git diff`, or `git log --all -p`. Updated
+  `PROGRESS.md` (hardening paragraph appended to the Slice 2 state) and
+  `DECISIONS.md` (six new entries: the Apollo rate-limit/provider-error
+  taxonomy, the seed-fallback-of-a-fallback behavior, SDE 2's credential
+  redaction, `responseJsonSchema` provider-side enforcement, the
+  `gemini-3.6-flash` model change with its live-verified justification, and
+  the no-new-dependency `unittest` decision).
+- Files or areas affected: `app/llm.py` (GEMINI_MODEL constant only, on top
+  of SDE 1+2's existing hardening diff — no other code changes this
+  session), `PROGRESS.md`, `DECISIONS.md`, `collaboration.md` (this entry).
+  Full file list for the slice: `app/audit_banners.py`, `app/llm.py`,
+  `app/main.py`, `app/sources/__init__.py`, `app/sources/apollo.py`,
+  `app/sources/base.py`, `app/sources/seed.py`, `app/templates/
+  settings.html`, `tests/__init__.py`, `tests/test_slice2_hardening.py`,
+  plus the three docs files.
+- Verification: `python -m unittest tests.test_slice2_hardening` — 32
+  tests passed both before and after the model change. Live: one
+  no-key/no-Apollo-key campaign (workspace "No-Key Demo", campaign id 6)
+  correctly produced `intake.gemini_error` and a valid heuristic Brief
+  against the still-configured `gemini-2.5-flash` (proving correction 1's
+  graceful-degradation path fires on a real live error, not just a mocked
+  one); one campaign after the model switch (same workspace, campaign id 7)
+  produced `intake.llm_ok` with a genuinely LLM-parsed Brief. Settings page
+  HTML confirmed to show only the masked placeholder for the saved key,
+  never the raw value. `git status`/`git diff --stat` confirmed the working
+  diff touches only the files listed above — no `outpost.db`, no
+  `seeds/companies.json` changes. `git diff | grep -i AIza` and
+  `git log --all -p | grep -i AIza` both came back clean.
+- Known limitations: Apollo's 401-vs-403-vs-429 status convention and
+  Gemini's credential-rejection error shape remain governed by each
+  provider's own conventions rather than a documented contract, as already
+  noted in SLICE_2_PLAN.md. The Starlette `TestClient`/httpx deprecation
+  warning noted by SDE 2 is still present and non-blocking. Fit-scoring,
+  drafting, and the pipeline board remain out of scope for this slice and
+  arrive in Slices 3–4 as planned; Slice 3 was explicitly not started or
+  implemented during this hardening pass.
+- Next action: Owner reviews and merges/pushes this hardening branch as
+  desired. Once merged, Slice 3 (fit-scoring with citations, already
+  planned in `SLICE_3_PLAN.md`) is next — implementation still needs the
+  owner's model-switch confirmation per CLAUDE.md before it begins.

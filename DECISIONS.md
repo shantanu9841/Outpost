@@ -124,3 +124,39 @@ Rejected: Nothing rejected — this is the natural choice for the stack already 
 Decision: The `audit` table's schema, as first created, includes a nullable `campaign_id` column, and `list_audit(workspace_id, campaign_id)` filters directly on it.
 Why: An earlier draft (v1) had no `campaign_id` column and instead inferred which audit rows belonged to a campaign by a time-window heuristic ("the two most recent rows near campaign creation"), which is fragile under any concurrent activity. Since this is the first version of the table ever shipped, there was no reason to ship the fragile version first and migrate later.
 Rejected: The time-window heuristic. Confirmed fragile in review; no advantage over a real foreign key.
+
+## Apollo status classification separates rate-limits and provider errors from credential problems
+*2026-07-30*
+Decision: `SourceStatus` grew three values beyond Slice 2's original set — `RATE_LIMITED` (Apollo 429), `PROVIDER_ERROR` (Apollo 5xx, 422, or any other unexpected non-200, and a malformed HTTP 200 payload), and `SEED_ERROR` (the local seed fallback itself failed to load). Only a 401 maps to `INVALID_KEY`; a 403 stays `INSUFFICIENT_PLAN`.
+Why: The original Slice 2 implementation collapsed every non-200/401/403 response into `INVALID_KEY`, which would tell an owner to replace a perfectly good key when Apollo was actually throttling them or having a bad day on its own infrastructure. That is actively misleading advice, and the failure mode is genuine — Apollo documents 429s, and 5xx/422 are ordinary provider realities. Each status now has banner copy that matches the real cause (wait and retry vs. this is Apollo's side, not yours vs. check your key), so the owner is never misdirected.
+Rejected: Keeping a single generic non-200 bucket. Simpler, but it actively misinforms the person reading the banner — worse than no message at all.
+
+## discover() never claims seed data was shown when the seed fallback itself fails
+*2026-07-30*
+Decision: If a live source fails and the seed fallback used to paper over that failure also fails (missing/invalid/misshaped seed file), `discover()` returns `SEED_ERROR` with zero candidates and a combined explanation, rather than returning `SourceStatus.OK`-shaped seed data that doesn't actually exist.
+Why: The whole point of the fallback design (from Slice 2) is that campaign-detail always shows what happened and why. A fallback-of-a-fallback failure is rare but real (a corrupted or missing `seeds/companies.json`), and silently reporting "seed data" when there is none would violate the same "never a silent fallback" principle the original discover() design was built around.
+Rejected: Letting `SeedSource.search()` raise on failure and letting that exception propagate. Violates the Source "never raises" contract and would turn a data problem into a 500.
+
+## Provider error messages are redacted for an echoed credential before storage or display
+*2026-07-30*
+Decision: `apollo._safe_reason` and `llm._safe_gemini_reason` now take the API key used for the request and replace any occurrence of it in the extracted provider message with `[REDACTED]` before truncating and returning it.
+Why: A provider's own error message can, in principle, echo back part of the request that included the credential (e.g. an error that quotes an invalid header value). The existing sanitizers already avoided raw payloads and URLs, but hadn't accounted for a provider intentionally or accidentally echoing the key inside an otherwise-legitimate message field. Added by SDE 2 during the hardening pass and adopted as-is after review.
+Rejected: Nothing rejected — this closes a real gap with no downside; the redaction only ever fires on the rare case where a key substring appears in a message, and is a no-op otherwise.
+
+## Gemini structured output uses provider-side responseJsonSchema in addition to local Pydantic validation
+*2026-07-30*
+Decision: `app/llm.py` sends `generationConfig.responseJsonSchema`, derived from `schema.model_json_schema()` with a small set of unsupported keywords stripped (currently `default`, `$schema`), on every structured-output call. Local Pydantic validation and the existing two-shot corrective retry are unchanged and remain the final authority.
+Why: Verified against the current official Gemini API reference (ai.google.dev/api/generate-content) before coding, per the hardening instructions — the native `generateContent` endpoint accepts a standard JSON Schema via `responseJsonSchema`, which is the least-lossy way to hand it a schema Pydantic already produces (as opposed to hand-converting to the older, more restrictive `responseSchema` OpenAPI subset). Provider-side enforcement reduces how often the model returns something that fails local validation at all, without replacing local validation as the actual guarantee.
+Rejected: Relying on local validation alone (the original Slice 2 behavior) — works, but leaves more of the burden on the two-shot retry than necessary. Also rejected: switching to `responseSchema` — well-documented and stable, but a lossier target for a schema that's already a full JSON Schema.
+
+## Gemini model updated from gemini-2.5-flash to gemini-3.6-flash
+*2026-07-30*
+Decision: `GEMINI_MODEL` in `app/llm.py` changed from `gemini-2.5-flash` to `gemini-3.6-flash`.
+Why: Live verification of the hardening pass, run against a newly rotated Gemini key pasted through Settings, returned Gemini's own error: "This model models/gemini-2.5-flash is no longer available to new users." This is exactly the condition the hardening instructions required before touching the model — documentation review alone hadn't caught it, but the live call did. Per instructions, implementation stopped and asked the owner before changing anything; the owner confirmed the switch to `gemini-3.6-flash`, the current stable flash-tier model per ai.google.dev/gemini-api/docs/models. Re-verified live afterward: `intake.llm_ok` recorded, a correctly LLM-parsed Brief produced (cleanly split product/audience/niche, not the heuristic's raw-text truncation).
+Rejected: Leaving `gemini-2.5-flash` configured. Would have shipped hardening whose live-key path was never actually provably exercised — every real key would silently degrade to the heuristic via `GEMINI_ERROR`, defeating the point of correction 8's live verification.
+
+## New dependency: unittest-based test suite (no new package)
+*2026-07-30*
+Decision: `tests/test_slice2_hardening.py` uses Python's built-in `unittest` plus `unittest.mock`, both already in the standard library — no new test framework dependency added to `requirements.txt`.
+Why: This is the project's first maintained, retained test module (prior verification was always a disposable script per collaboration.md rule 15). `unittest` covers everything needed here (mocked httpx responses, `fastapi.testclient.TestClient`, a temporary SQLite file) without introducing pytest or any other package, honoring CLAUDE.md's "no new dependency unless necessary."
+Rejected: pytest. More ergonomic for larger suites, but an unnecessary new dependency for 32 tests when unittest already does the job.

@@ -2,14 +2,18 @@
 
 This is what runs a business campaign to completion with zero keys pasted,
 per the demo-mode non-negotiable. It is not a special case in discovery —
-just another Source, and from its own point of view reading a bundled JSON
-file never fails: search() always returns status=OK. Whether the caller is
-using seed data as a genuine choice or as a fallback (and why) is something
-only discover() knows — see app/sources/__init__.py.
+just another Source. Reading a bundled JSON file *usually* succeeds, but it
+is still I/O over a real file, so this honors the Source "never raises"
+contract: a missing file, invalid JSON, an unexpected top-level shape, or a
+malformed row comes back as a typed SourceResult(status=SEED_ERROR), never an
+exception. Whether seed data is a genuine choice or a fallback (and why) is
+something only discover() knows — see app/sources/__init__.py.
 """
 
 import json
 from pathlib import Path
+
+from pydantic import ValidationError
 
 from app.models import Brief, Candidate
 from app.sources.base import Source, SourceResult, SourceStatus
@@ -25,14 +29,49 @@ class SeedSource(Source):
 
     def search(self, brief: Brief) -> SourceResult:
         if self.kind != "business":
-            # Creator seed data arrives in Slice 5.
-            return SourceResult([], SourceStatus.OK, "seed", "seed", None)
+            # Creator seed data arrives in Slice 5; nothing to read yet.
+            return self._result([], SourceStatus.OK, None)
 
-        companies = json.loads((SEEDS_DIR / "companies.json").read_text())
+        try:
+            raw_text = (SEEDS_DIR / "companies.json").read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return self._result(
+                [], SourceStatus.SEED_ERROR, f"could not read seed data ({type(exc).__name__})"
+            )
+
+        try:
+            companies = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return self._result([], SourceStatus.SEED_ERROR, "seed data was not valid JSON")
+
+        if not isinstance(companies, list):
+            return self._result(
+                [], SourceStatus.SEED_ERROR, "seed data was not a list of companies"
+            )
+
         if brief.target_countries:
-            companies = [c for c in companies if c.get("country") in brief.target_countries]
-        candidates = [self._to_candidate(company) for company in companies]
-        return SourceResult(candidates, SourceStatus.OK, "seed", "seed", None)
+            companies = [
+                c
+                for c in companies
+                if isinstance(c, dict) and c.get("country") in brief.target_countries
+            ]
+
+        candidates = []
+        for company in companies:
+            if not isinstance(company, dict):
+                return self._result(
+                    [], SourceStatus.SEED_ERROR, "seed data contained a malformed row"
+                )
+            try:
+                candidates.append(self._to_candidate(company))
+            except (KeyError, TypeError, ValidationError):
+                return self._result(
+                    [], SourceStatus.SEED_ERROR, "seed data contained a malformed company row"
+                )
+        return self._result(candidates, SourceStatus.OK, None)
+
+    def _result(self, candidates, status, reason) -> SourceResult:
+        return SourceResult(candidates, status, "seed", "seed", reason)
 
     def evidence(self, candidate: Candidate) -> dict:
         return candidate.raw

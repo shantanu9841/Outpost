@@ -16,9 +16,12 @@ from app.models import Brief, Candidate
 class SourceStatus(str, Enum):
     OK = "ok"
     NO_KEY = "no_key"
-    INVALID_KEY = "invalid_key"
-    INSUFFICIENT_PLAN = "insufficient_plan"
-    NETWORK_ERROR = "network_error"
+    INVALID_KEY = "invalid_key"          # credential rejected (e.g. Apollo 401)
+    INSUFFICIENT_PLAN = "insufficient_plan"  # valid key, plan lacks the endpoint (403)
+    RATE_LIMITED = "rate_limited"        # provider is throttling (429) — not a key problem
+    PROVIDER_ERROR = "provider_error"    # provider-side failure (5xx/422/unexpected) — not a key problem
+    NETWORK_ERROR = "network_error"      # could not reach the provider at all
+    SEED_ERROR = "seed_error"            # the local seed fallback itself could not load
 
 
 @dataclass

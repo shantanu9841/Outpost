@@ -46,8 +46,39 @@ audit rows and campaign/target rows stay correctly scoped to their own workspace
 checks in both light and dark themes. Screenshots were not available in this
 session's headless browser tooling; computed-style verification (the plan's
 preferred method) fully substituted. One new dependency added: `httpx` (used for
-both the Apollo and Gemini REST calls — logged in DECISIONS.md). Next action:
-Slice 3 (fit-scoring with citations).
+both the Apollo and Gemini REST calls — logged in DECISIONS.md).
+
+**Slice 2 hardening pass** (branch `codex/sde-1-slice-2-hardening`, done jointly
+by SDE 1 and SDE 2) closed eight gaps found before Slice 3 could be trusted to
+build on top of Slice 2's error handling: `app/llm.py` no longer leaks a raw
+`JSONDecodeError`/`KeyError`/`IndexError` when Gemini returns HTTP 200 with a
+malformed, empty, or textless body — every such case now becomes a sanitized
+`LLMError(ERROR)` and `intake.parse_brief` degrades to the heuristic Brief with
+`GEMINI_ERROR`; the request now also sends `generationConfig.responseJsonSchema`
+(derived from `model_json_schema()`) so Gemini enforces structure server-side in
+addition to local Pydantic validation; `SourceStatus` grew `RATE_LIMITED`,
+`PROVIDER_ERROR`, and `SEED_ERROR` so a 429 or 5xx from Apollo is no longer
+misclassified as a bad key, with banner copy that tells the owner to wait or
+that it's Apollo's side, not theirs; both `ApolloSource` and `SeedSource` now
+hold to a genuine "never raises" contract (malformed 200 payloads, missing/
+invalid/misshaped seed files, and invalid UTF-8 all become typed failures), and
+`discover()` no longer claims seed data was shown if the seed fallback itself
+fails; provider error messages are now redacted for an echoed credential before
+they ever reach the UI or audit trail; `POST /campaigns` validates `target_type`
+against the shared `TargetType` literal (422 on garbage) and rejects empty/
+whitespace `promoting_what` (422) instead of risking a 500; and the Settings
+page's Gemini hint now accurately describes the GEMINI_API_KEY/demo-heuristic
+fallback instead of overstating a "free tier." A maintained `tests/
+test_slice2_hardening.py` (unittest, mocked httpx, temp SQLite, 32 tests) now
+guards all of this — no more disposable one-off scripts for this kind of check.
+Live-verified with a freshly rotated Gemini key pasted through Settings (the
+key posted earlier in chat was treated as compromised and never used): the live
+call surfaced that `gemini-2.5-flash` is no longer available to new users, so
+— after stopping to ask the owner, per the hardening instructions — `GEMINI_MODEL`
+was updated to `gemini-3.6-flash` (current stable per ai.google.dev), re-verified
+live to produce a correctly-parsed Brief with `intake.llm_ok` recorded, the key
+masked in Settings, and no key value in console output, audit `detail`, tracked
+files, or git history. Next action: Slice 3 (fit-scoring with citations).
 
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)

@@ -11,13 +11,14 @@ import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Cookie, Depends, FastAPI, Form, Request
+from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import audit_banners, db, sources
 from app.agent import intake
+from app.models import TargetType
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_COOKIE = "workspace_id"
@@ -209,22 +210,30 @@ def new_campaign_form(
 
 @app.post("/campaigns")
 def create_campaign(
+    # target_type is typed with the shared TargetType literal, so FastAPI
+    # returns a controlled 422 for any value other than creator/business
+    # rather than letting an unknown value reach (and KeyError) the audit maps.
     promoting_what: str = Form(...),
-    target_type: str = Form(...),
+    target_type: TargetType = Form(...),
     workspace=Depends(get_current_workspace),
 ):
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
 
+    cleaned_promoting_what = promoting_what.strip()
+    if not cleaned_promoting_what:
+        # Empty/whitespace intake is a controlled 4xx, never a 500 downstream.
+        raise HTTPException(status_code=422, detail="Describe what you're promoting.")
+
     workspace_id = workspace["id"]
     settings = db.get_settings(workspace_id)
 
     # 1. Parse the Brief and retain IntakeStatus.
-    intake_result = intake.parse_brief(promoting_what.strip(), target_type, settings)
+    intake_result = intake.parse_brief(cleaned_promoting_what, target_type, settings)
 
     # 2. Create the campaign and obtain campaign_id.
     campaign_id = db.create_campaign(
-        workspace_id, promoting_what.strip(), intake_result.brief.model_dump_json(), target_type
+        workspace_id, cleaned_promoting_what, intake_result.brief.model_dump_json(), target_type
     )
 
     # 3. Write the intake audit row with workspace_id and campaign_id.

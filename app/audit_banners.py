@@ -3,8 +3,8 @@
 No status is ever turned into an audit action via string interpolation of
 the enum value — that would silently rename NO_KEY's action from the
 intended "discovery.no_apollo_key" to "discovery.no_key". Both main.py (real
-behavior) and scripts/verify_error_paths.py import these same maps, so what
-gets verified is guaranteed to match production.
+behavior) and tests/test_slice2_hardening.py import these same maps, so what
+is tested is guaranteed to match production.
 """
 
 from app.agent.intake import IntakeStatus
@@ -28,10 +28,25 @@ DISCOVERY_MAP: dict[SourceStatus, tuple[str, str | None, str | None]] = {
         "warning",
         "Apollo rejected the request ({reason}). Falling back to seed data — your Apollo plan doesn't include company search.",
     ),
+    SourceStatus.RATE_LIMITED: (
+        "discovery.rate_limited",
+        "warning",
+        "Apollo is rate-limiting requests right now ({reason}). Falling back to seed data — try again in a little while; your key is fine.",
+    ),
+    SourceStatus.PROVIDER_ERROR: (
+        "discovery.provider_error",
+        "warning",
+        "Apollo couldn't complete the search ({reason}). Falling back to seed data — this is a problem on Apollo's side, not your key.",
+    ),
     SourceStatus.NETWORK_ERROR: (
         "discovery.network_error",
         "warning",
         "Couldn't reach Apollo ({reason}). Falling back to seed data — check your connection and try again.",
+    ),
+    SourceStatus.SEED_ERROR: (
+        "discovery.seed_error",
+        "warning",
+        "Discovery couldn't load any targets ({reason}). No results to show — this is a local data problem, not your Apollo key.",
     ),
 }
 
