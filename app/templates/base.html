@@ -47,6 +47,7 @@
         <nav class="rail__nav">
           <a class="rail__item {% if request.url.path == '/' %}rail__item--active{% endif %}" href="/">Home</a>
           {% if workspace %}
+          <a class="rail__item {% if request.url.path.startswith('/campaigns') %}rail__item--active{% endif %}" href="/campaigns">Campaigns</a>
           <a class="rail__item {% if request.url.path == '/settings' %}rail__item--active{% endif %}" href="/settings">Settings</a>
           {% endif %}
         </nav>

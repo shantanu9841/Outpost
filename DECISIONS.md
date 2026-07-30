@@ -94,3 +94,33 @@ Rejected: A user-accounts/login system. Out of scope for a local single-owner to
 Decision: Added python-multipart to requirements.txt.
 Why: FastAPI requires it to parse HTML form submissions (Form(...) parameters), which Slice 1's workspace-create and settings-save routes use. Server-rendered HTML with plain form posts (per the stack decision) needs this to read the posted fields at all.
 Rejected: Nothing rejected — this is a required transitive dependency for the chosen stack, not a design choice with alternatives.
+
+## Every source returns one shared SourceResult contract
+*2026-07-30*
+Decision: Every Source implementation's `search()` returns the same `SourceResult` dataclass (candidates, status, source_attempted, source_used, sanitized reason) and never raises past its own boundary. `discover()` is the only place that decides whether and why to fall back to seed data.
+Why: A live-Apollo test during Slice 2 planning exposed that the real free-tier key returns 403 on every search endpoint, and the first implementation attempt (v1, `slice-2-scratch`) treated that as a crash instead of a normal, handled outcome. Centralizing fallback logic in one place, with one uniform result shape, means adding a second live source later (Slice 5) can't reintroduce that bug independently.
+Rejected: Letting each source raise its own exception type and having the caller catch and interpret them. Scales badly past one source and was the exact shape of the original bug.
+
+## IntakeStatus distinguishes a rejected credential from every other failure
+*2026-07-30*
+Decision: `IntakeStatus` has four values — `LLM_OK`, `NO_GEMINI_KEY`, `INVALID_GEMINI_KEY`, `GEMINI_ERROR` — where `INVALID_GEMINI_KEY` is reserved strictly for a response Gemini's API itself identifies as a credential rejection (HTTP 403, or 400 with `INVALID_ARGUMENT` and an "API key" message). Everything else — network failure, timeout, other HTTP status, exhausted validation retry — is `GEMINI_ERROR`.
+Why: Collapsing these into one "something went wrong with the key" status would tell the owner to check their Gemini key when the real problem might be a network blip or a transient 5xx, which is actively misleading advice. Confirmed live against the real API (see verification below) before relying on the distinction elsewhere.
+Rejected: A single generic `INTAKE_ERROR` status. Simpler but loses information the UI can act on.
+
+## Settings key renamed llm -> gemini
+*2026-07-30*
+Decision: The workspace setting previously named `llm` is renamed to `gemini`, with an idempotent startup migration (`UPDATE workspace_setting SET key_name = 'gemini' WHERE key_name = 'llm'`) that preserves any existing saved key.
+Why: The code only ever calls Gemini's API — naming the setting `llm` implied a choice of provider that doesn't exist yet and would mislead the owner into thinking any LLM key works there.
+Rejected: Keeping the generic `llm` name for future-proofing. Speculative; nothing in the current build supports a second LLM provider, and CLAUDE.md's Local data rule requires any such rename to preserve existing rows rather than assume a clean slate.
+
+## New dependency: httpx
+*2026-07-30*
+Decision: Added httpx to requirements.txt.
+Why: One HTTP client for both the Apollo REST calls (`app/sources/apollo.py`) and the Gemini REST calls (`app/llm.py`), with synchronous calls matching FastAPI's sync route handlers used so far.
+Rejected: Nothing rejected — this is the natural choice for the stack already in place.
+
+## Audit schema includes campaign_id from the start
+*2026-07-30*
+Decision: The `audit` table's schema, as first created, includes a nullable `campaign_id` column, and `list_audit(workspace_id, campaign_id)` filters directly on it.
+Why: An earlier draft (v1) had no `campaign_id` column and instead inferred which audit rows belonged to a campaign by a time-window heuristic ("the two most recent rows near campaign creation"), which is fragile under any concurrent activity. Since this is the first version of the table ever shipped, there was no reason to ship the fragile version first and migrate later.
+Rejected: The time-window heuristic. Confirmed fragile in review; no advantage over a real foreign key.

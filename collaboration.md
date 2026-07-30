@@ -185,3 +185,91 @@ or coding sessions. It complements, but does not replace:
   verification script to confirm the Apollo/Gemini error-shape assumptions
   live before wiring the rest of the route/audit/banner behavior around
   them.
+
+## 2026-07-30 — Slice 2 implemented: B2B discovery via Apollo
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 2 (B2B discovery via Apollo) — full implementation
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Implemented `SLICE_2_PLAN.md` end to end,
+  reviewing and adapting the `slice-2-scratch@96a01f8` files per §15's
+  verdicts rather than cherry-picking them. New: `app/models.py` (Brief,
+  Candidate, module-level `TargetType`), `app/llm.py` (Gemini transport,
+  two-shot schema-aware retry, `LLMError`/`LLMErrorKind` distinguishing a
+  rejected credential from every other failure), `app/agent/intake.py`
+  (`IntakeResult`/`IntakeStatus` with the four-way status split and
+  word-boundary country-alias extraction for the zero-Gemini heuristic
+  path), `app/sources/base.py` (`SourceStatus`/`SourceResult`, the one
+  contract every source's `search()` returns), `app/sources/apollo.py`
+  (never raises; maps 200/401/403/network-error/other to the shared
+  result, with a sanitizing `_safe_reason` helper), `app/sources/seed.py`
+  (always returns `status=OK` from its own point of view; filters by
+  `brief.target_countries`), `app/sources/__init__.py` (`discover()`,
+  the only place that owns fallback semantics and preserves the original
+  failure status/reason), `app/audit_banners.py` (explicit
+  `DISCOVERY_MAP`/`INTAKE_MAP` plus a derived `BANNER_BY_ACTION` reverse
+  index for rendering banners from persisted audit rows), and the three
+  campaign templates. Modified: `app/db.py` (final `audit` schema with
+  `campaign_id` from the start, the `llm`->`gemini` migration,
+  `add_audit`/`list_audit`, `SETTING_KEYS` swap, plus the reused
+  `campaign`/`target` tables and CRUD), `app/main.py` (the corrected
+  7-step `create_campaign` sequence and a `campaign_detail` that derives
+  banners from `list_audit` rather than a query string; `save_settings`'s
+  `llm` param renamed to `gemini`), `app/templates/base.html` (Campaigns
+  nav item), `app/templates/settings.html` (relabeled Gemini field),
+  `app/static/css/app.css` (added `.page`/`.table*`/`.chips`/
+  `.form-card--wide`/`.textarea`/`.target-type*` from v1 unchanged, plus
+  new `.banners`/`.banner--info`/`.banner--warning`, token-only),
+  `requirements.txt` (added `httpx`). One deliberate deviation from the
+  plan: the Country column reads `raw_json`'s `country` field directly
+  rather than the `location` string (which joins city/state/country) —
+  needed to actually satisfy the plan's own stated column list
+  (Company/Domain/Country/Size/Source) showing only the country. A
+  temporary `scripts/verify_error_paths.py` (per §14.1) was written, run
+  once against the real Apollo and Gemini APIs to confirm the error-shape
+  mapping, and then deleted per the plan's default and collaboration.md
+  rule 15 (not converted into a maintained test, since no test framework
+  exists yet in this project).
+- Files or areas affected: All files listed in SLICE_2_PLAN.md §16 (new
+  and modified), plus this entry, PROGRESS.md, and DECISIONS.md.
+- Verification: Ran the full §14.3 checklist against a second, temporary
+  uvicorn instance on port 8001 (port 8000 was occupied by another
+  session's server on this same machine; that server was left untouched).
+  Confirmed: (1) the `llm`->`gemini` migration leaves zero `llm` rows on
+  startup; (2) a fresh no-key workspace's business campaign returns 6 US
+  seed rows with `intake.no_gemini_key` and `discovery.no_apollo_key`
+  info banners, both audited; (3) the owner's real, plan-limited Apollo
+  key (workspace "Demo Wellness Co") returns a live 403 that maps to
+  `discovery.insufficient_plan` with a warning banner and seed fallback —
+  the exact regression that motivated this corrected plan; (4) and (6)
+  invalid-credential paths for Apollo (401) and Gemini, run once via the
+  temporary script directly against both live APIs, confirming
+  `INVALID_KEY`/`INVALID_GEMINI_KEY` map correctly before the script was
+  deleted; (5) no-Gemini-key heuristic intake confirmed via the same
+  no-key-workspace campaign; (7) a brief mentioning "UK and Germany" with
+  no Gemini key extracts `["United Kingdom", "Germany"]` and the seed
+  filter returns exactly the 4 non-US rows; (8) Workspace Alpha and Beta
+  (from Slice 1) show zero campaigns and no audit/target rows leaked in,
+  confirmed by direct `outpost.db` query; (9) computed-style checks
+  confirmed `.banners` gap resolves to 16px (`--space-4`) and both
+  `.banner--info`/`.banner--warning` colors resolve from
+  `--info`/`--warning`(`-subtle`) in both light and dark themes (toggled
+  live in the browser pane). Screenshots were not available in this
+  session's headless browser tooling (the pane could not composite
+  frames); computed-style verification — the plan's own preferred method
+  — fully substituted for the two-screenshot allowance. No `outpost.db`
+  rows were deleted or reset; verification created one new workspace
+  ("No-Key Demo") and a few campaigns as normal product usage, left in
+  place same as Slice 1's Alpha/Beta verification data.
+- Known limitations: No automated test suite exists yet for this project,
+  so the invalid-credential verification was one-time and manual (per
+  plan §14.1's own instruction) rather than a repeatable regression test.
+  The Apollo 401-vs-403 status mapping and Gemini's 400/403 credential-
+  rejection mapping are both now confirmed live, but remain governed by
+  each provider's own (undocumented-as-a-contract) conventions, as noted
+  in SLICE_2_PLAN.md §4 and §3. Fit scoring, drafting, and the pipeline
+  board are not part of this slice and arrive in Slices 3–4.
+- Next action: Slice 3 (fit-scoring with citations), per SPEC.md §6 and
+  PROGRESS.md. Model recommendation for that slice's planning is still
+  owed to the owner before implementation begins, per CLAUDE.md.

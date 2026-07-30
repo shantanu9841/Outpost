@@ -1,0 +1,92 @@
+[
+  {
+    "name": "Northbridge Distribution Co.",
+    "domain": "northbridgedist.com",
+    "industry": "Wholesale distribution",
+    "employees": 180,
+    "city": "Columbus",
+    "state": "OH",
+    "country": "United States"
+  },
+  {
+    "name": "Cascade Logistics Partners",
+    "domain": "cascadelogistics.com",
+    "industry": "Third-party logistics",
+    "employees": 340,
+    "city": "Portland",
+    "state": "OR",
+    "country": "United States"
+  },
+  {
+    "name": "Meridian Health Supply",
+    "domain": "meridianhealthsupply.com",
+    "industry": "Health & wellness distribution",
+    "employees": 95,
+    "city": "Denver",
+    "state": "CO",
+    "country": "United States"
+  },
+  {
+    "name": "Ironclad Freight Solutions",
+    "domain": "ironcladfreight.com",
+    "industry": "Freight & logistics",
+    "employees": 520,
+    "city": "Dallas",
+    "state": "TX",
+    "country": "United States"
+  },
+  {
+    "name": "Summit Supply Chain Group",
+    "domain": "summitsupplychain.com",
+    "industry": "Supply chain services",
+    "employees": 410,
+    "city": "Salt Lake City",
+    "state": "UT",
+    "country": "United States"
+  },
+  {
+    "name": "Cornerstone Wellness Distributors",
+    "domain": "cornerstonewellness.com",
+    "industry": "Health & wellness distribution",
+    "employees": 75,
+    "city": "Austin",
+    "state": "TX",
+    "country": "United States"
+  },
+  {
+    "name": "Thameside Distribution Ltd.",
+    "domain": "thamesidedist.co.uk",
+    "industry": "Wholesale distribution",
+    "employees": 150,
+    "city": "London",
+    "state": "",
+    "country": "United Kingdom"
+  },
+  {
+    "name": "Midlands Logistics Group",
+    "domain": "midlandslogistics.co.uk",
+    "industry": "Third-party logistics",
+    "employees": 290,
+    "city": "Birmingham",
+    "state": "",
+    "country": "United Kingdom"
+  },
+  {
+    "name": "Rheinland Vertrieb GmbH",
+    "domain": "rheinland-vertrieb.de",
+    "industry": "Wholesale distribution",
+    "employees": 210,
+    "city": "Cologne",
+    "state": "",
+    "country": "Germany"
+  },
+  {
+    "name": "Nordfracht Logistik GmbH",
+    "domain": "nordfracht-logistik.de",
+    "industry": "Freight & logistics",
+    "employees": 380,
+    "city": "Hamburg",
+    "state": "",
+    "country": "Germany"
+  }
+]

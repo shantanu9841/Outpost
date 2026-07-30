@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Campaign — Outpost{% endblock %}
+{% block topbar %}Campaign{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page__header">
+    <h1 class="page__title">{{ campaign.promoting_what }}</h1>
+  </div>
+
+  {% if banners %}
+  <div class="banners">
+    {% for severity, text in banners %}
+    <div class="banner banner--{{ severity }}">{{ text }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="chips">
+    <span class="chip"><span class="chip__label">Audience</span>{{ brief.audience }}</span>
+    <span class="chip"><span class="chip__label">Tone</span>{{ brief.tone }}</span>
+    <span class="chip"><span class="chip__label">Industry</span>{{ brief.niche_or_industry }}</span>
+    <span class="chip"><span class="chip__label">Countries</span>{{ brief.target_countries|join(", ") }}</span>
+  </div>
+
+  {% if targets %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Company</th>
+          <th>Domain</th>
+          <th>Country</th>
+          <th class="table__num">Size</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in targets %}
+        <tr>
+          <td>{{ t.name }}</td>
+          <td>{{ t.handle_or_domain or "—" }}</td>
+          <td>{{ t.country or "—" }}</td>
+          <td class="table__num mono">{{ t.reach if t.reach is not none else "—" }}</td>
+          <td><span class="badge badge--muted">{{ t.source }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <section class="empty">
+    <span class="empty__badge"><span class="empty__dot"></span>No targets found</span>
+    <h1 class="empty__title">No candidates matched</h1>
+    <p class="empty__body">Try a broader description of what you're promoting.</p>
+  </section>
+  {% endif %}
+</section>
+{% endblock %}

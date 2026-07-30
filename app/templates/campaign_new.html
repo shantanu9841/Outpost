@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}New campaign — Outpost{% endblock %}
+{% block topbar %}New campaign{% endblock %}
+
+{% block content %}
+<section class="form-card form-card--wide">
+  <h1 class="form-card__title">What are you promoting?</h1>
+  <p class="form-card__body">
+    Describe the product or service in a sentence or two. Outpost turns this into a brief
+    and discovers relevant targets.
+  </p>
+  <form method="post" action="/campaigns" class="form-card__form">
+    <div>
+      <label class="label" for="promoting_what">Promoting</label>
+      <textarea
+        class="input textarea"
+        id="promoting_what"
+        name="promoting_what"
+        placeholder="e.g. Premium magnesium supplements for sleep, seeking US distributors and 3PL logistics partners"
+        required
+        autofocus
+      ></textarea>
+    </div>
+
+    <div>
+      <label class="label">Target type</label>
+      <div class="target-type">
+        <label class="target-type__option">
+          <input type="radio" name="target_type" value="business" checked />
+          <span>Businesses (distributors, logistics)</span>
+        </label>
+        <label class="target-type__option target-type__option--disabled">
+          <input type="radio" name="target_type" value="creator" disabled />
+          <span>Creators — coming in Slice 5</span>
+        </label>
+      </div>
+    </div>
+
+    <button class="btn btn--primary" type="submit">Discover targets</button>
+  </form>
+</section>
+{% endblock %}

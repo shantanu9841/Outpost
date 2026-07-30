@@ -1,10 +1,12 @@
 """Outpost FastAPI application.
 
 Slice 1: workspaces (create, switch) and per-workspace BYO-key settings.
+Slice 2: campaign intake and B2B discovery (Apollo, or seeded demo data).
 The active workspace is tracked in a cookie; every data-touching route
 depends on get_current_workspace to scope its queries.
 """
 
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +16,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import db
+from app import audit_banners, db, sources
+from app.agent import intake
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_COOKIE = "workspace_id"
@@ -133,12 +136,12 @@ def save_settings(
     youtube: str = Form(default=""),
     apify: str = Form(default=""),
     apollo: str = Form(default=""),
-    llm: str = Form(default=""),
+    gemini: str = Form(default=""),
 ) -> RedirectResponse:
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
 
-    submitted = {"youtube": youtube, "apify": apify, "apollo": apollo, "llm": llm}
+    submitted = {"youtube": youtube, "apify": apify, "apollo": apollo, "gemini": gemini}
     for key_name, key_value in submitted.items():
         # Blank means "leave unchanged" — the field shows a masked
         # placeholder, not the real value, so an empty submit must not
@@ -164,3 +167,126 @@ def _mask(value: str) -> str:
     if len(value) <= 4:
         return "••••"
     return "••••" + value[-4:]
+
+
+# --- Campaigns and discovery --------------------------------------------
+
+
+@app.get("/campaigns")
+def campaigns_list(
+    request: Request,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+
+    campaigns = db.list_campaigns(workspace["id"])
+    return templates.TemplateResponse(
+        request,
+        "campaigns_list.html",
+        {
+            "workspace": workspace,
+            "workspaces": db.list_workspaces(),
+            "campaigns": campaigns,
+        },
+    )
+
+
+@app.get("/campaigns/new")
+def new_campaign_form(
+    request: Request,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+
+    return templates.TemplateResponse(
+        request,
+        "campaign_new.html",
+        {"workspace": workspace, "workspaces": db.list_workspaces()},
+    )
+
+
+@app.post("/campaigns")
+def create_campaign(
+    promoting_what: str = Form(...),
+    target_type: str = Form(...),
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+
+    workspace_id = workspace["id"]
+    settings = db.get_settings(workspace_id)
+
+    # 1. Parse the Brief and retain IntakeStatus.
+    intake_result = intake.parse_brief(promoting_what.strip(), target_type, settings)
+
+    # 2. Create the campaign and obtain campaign_id.
+    campaign_id = db.create_campaign(
+        workspace_id, promoting_what.strip(), intake_result.brief.model_dump_json(), target_type
+    )
+
+    # 3. Write the intake audit row with workspace_id and campaign_id.
+    intake_action, _, _ = audit_banners.INTAKE_MAP[intake_result.status]
+    db.add_audit(workspace_id, campaign_id, "agent", intake_action, detail=intake_result.reason)
+
+    # 4. Run discovery.
+    discovery_result = sources.discover(intake_result.brief, settings)
+
+    # 5. Write the discovery audit row with workspace_id and campaign_id.
+    discovery_action, _, _ = audit_banners.DISCOVERY_MAP[discovery_result.status]
+    db.add_audit(workspace_id, campaign_id, "agent", discovery_action, detail=discovery_result.reason)
+
+    # 6. Save the returned targets.
+    db.add_targets(workspace_id, campaign_id, discovery_result.candidates, discovery_result.source_used)
+
+    # 7. Redirect to the campaign-detail route.
+    return RedirectResponse(f"/campaigns/{campaign_id}", status_code=303)
+
+
+@app.get("/campaigns/{campaign_id}")
+def campaign_detail(
+    campaign_id: int,
+    request: Request,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+
+    workspace_id = workspace["id"]
+    campaign = db.get_campaign(workspace_id, campaign_id)
+    if campaign is None:
+        return RedirectResponse("/campaigns", status_code=303)
+
+    brief = json.loads(campaign["brief_json"])
+    # The table shows only the country portion of each target's location
+    # (design.md's Company/Domain/Country/Size/Source columns); the raw
+    # source payload already carries a "country" field for both Apollo and
+    # seed candidates.
+    targets = []
+    for t in db.list_targets(workspace_id, campaign_id):
+        raw = json.loads(t["raw_json"]) if t["raw_json"] else {}
+        targets.append({**dict(t), "country": raw.get("country")})
+
+    # Banners are re-derived from the audit trail, not passed through the
+    # URL — the most recent intake.* and discovery.* rows for this campaign.
+    banners = []
+    for row in db.list_audit(workspace_id, campaign_id):
+        if row["action"].startswith("intake.") or row["action"].startswith("discovery."):
+            banner = audit_banners.banner_for(row["action"], row["detail"])
+            if banner is not None:
+                banners.append(banner)
+
+    return templates.TemplateResponse(
+        request,
+        "campaign_detail.html",
+        {
+            "workspace": workspace,
+            "workspaces": db.list_workspaces(),
+            "campaign": campaign,
+            "brief": brief,
+            "targets": targets,
+            "banners": banners,
+        },
+    )

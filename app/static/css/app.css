@@ -392,3 +392,161 @@ body {
   color: var(--text-3);
   background: var(--bg-subtle);
 }
+
+/* Generic page header (Campaigns list/detail) */
+.page {
+  max-width: 1100px;
+}
+
+.page__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.page__title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 32px;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+/* Mono for numeric/id-like values */
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Table, per design.md section 4 */
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  margin-bottom: var(--space-8);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table thead tr {
+  background: var(--bg-subtle);
+}
+
+.table th {
+  text-align: left;
+  padding: var(--space-2) var(--space-4);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.table td {
+  padding: 10px var(--space-4);
+  font-size: 13px;
+  border-top: 1px solid var(--border);
+}
+
+.table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.table__row--link {
+  cursor: pointer;
+}
+
+.table__num {
+  text-align: right;
+}
+
+/* Brief summary chips (campaign detail) */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-control);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.chip__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Banners (campaign detail) — one stacked column, ordered intake then discovery */
+.banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.banner {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-control);
+  font-size: 13px;
+}
+
+.banner--info {
+  background: var(--info-subtle);
+  color: var(--info);
+  border: 1px solid var(--info-subtle);
+}
+
+.banner--warning {
+  background: var(--warning-subtle);
+  color: var(--warning);
+  border: 1px solid var(--warning-subtle);
+}
+
+/* Wide form card (campaign intake) */
+.form-card--wide {
+  max-width: 640px;
+}
+
+.textarea {
+  height: auto;
+  min-height: 74px;
+  padding: var(--space-3);
+  resize: vertical;
+  line-height: 20px;
+}
+
+/* Target type radio group (campaign intake) */
+.target-type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.target-type__option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.target-type__option--disabled {
+  color: var(--text-3);
+}

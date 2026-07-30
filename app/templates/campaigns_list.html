@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Campaigns — Outpost{% endblock %}
+{% block topbar %}Campaigns{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page__header">
+    <h1 class="page__title">Campaigns — {{ workspace.name }}</h1>
+    <a class="btn btn--primary" href="/campaigns/new">New campaign</a>
+  </div>
+
+  {% if campaigns %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Promoting</th>
+          <th>Target type</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in campaigns %}
+        <tr onclick="window.location='/campaigns/{{ c.id }}'" class="table__row--link">
+          <td>{{ c.promoting_what[:80] }}{% if c.promoting_what|length > 80 %}…{% endif %}</td>
+          <td><span class="badge badge--muted">{{ c.target_type }}</span></td>
+          <td class="mono">{{ c.created_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <section class="empty">
+    <span class="empty__badge"><span class="empty__dot"></span>No campaigns yet</span>
+    <h1 class="empty__title">Start your first campaign</h1>
+    <p class="empty__body">
+      Describe what you're promoting and Outpost will discover relevant targets.
+    </p>
+  </section>
+  {% endif %}
+</section>
+{% endblock %}
