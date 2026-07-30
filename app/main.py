@@ -260,8 +260,17 @@ def create_campaign(
     ]
 
     # 8. Score the whole batch in one LLM call (bounded latency; a rejected
-    # credential is a single 403, never a per-target retry loop).
-    score_outcome = scoring.score_batch(intake_result.brief, evidence_list, settings)
+    # credential is a single 403, never a per-target retry loop). If intake
+    # already learned this same Gemini key is rejected, don't ask it again.
+    known_invalid_reason = (
+        intake_result.reason
+        if intake_result.status == intake.IntakeStatus.INVALID_GEMINI_KEY
+        else None
+    )
+    score_outcome = scoring.score_batch(
+        intake_result.brief, evidence_list, settings,
+        known_invalid_key_reason=known_invalid_reason,
+    )
 
     # 9. Persist targets and their fit scores together, in one transaction —
     # a campaign is never left partially scored.

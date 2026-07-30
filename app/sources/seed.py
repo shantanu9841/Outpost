@@ -16,7 +16,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.models import Brief, Candidate
-from app.sources.base import Source, SourceResult, SourceStatus
+from app.sources.base import Source, SourceResult, SourceStatus, coerce_int
 
 SEEDS_DIR = Path(__file__).resolve().parent.parent.parent / "seeds"
 
@@ -31,7 +31,7 @@ def normalize_evidence(raw: dict) -> dict:
     return {
         "name": raw.get("name"),
         "industry": raw.get("industry"),
-        "employees": raw.get("employees"),
+        "employees": coerce_int(raw.get("employees")),
         "country": raw.get("country"),
         "domain": raw.get("domain"),
     }

@@ -7,8 +7,14 @@ independent of target count, and turns a rejected credential into a single
 schema shape is valid — every reason's evidence_key/evidence_value is checked
 against the target's own normalized evidence before it is ever stored; a
 missing assessment, or one with any ungrounded reason, falls back to the
-deterministic heuristic for that single target. The heuristic is grounded by
-construction, so every target always ends up with at least one true citation.
+deterministic heuristic for that single target. Every reason the heuristic
+does produce is grounded by construction — it only ever cites a value it just
+read from that target's own evidence, never a fabricated placeholder.
+
+If intake already learned this same Gemini key is rejected earlier in the
+same request, the caller passes known_invalid_key_reason so scoring skips
+its own live call rather than asking an already-rejected credential a second
+question.
 """
 
 import json
@@ -58,16 +64,33 @@ class ScoreOutcome:
 
 
 def score_batch(
-    brief: Brief, evidence_list: list[dict], settings: dict[str, str]
+    brief: Brief,
+    evidence_list: list[dict],
+    settings: dict[str, str],
+    *,
+    known_invalid_key_reason: str | None = None,
 ) -> ScoreOutcome:
     """Score every target in evidence_list with one structured LLM call.
 
     Falls back to the deterministic heuristic per-target whenever the LLM is
     unavailable, fails, or returns an assessment that doesn't ground to that
     target's own evidence. Never raises.
+
+    known_invalid_key_reason: set by the caller when this same Gemini key was
+    already rejected earlier in the same request (during intake). Skips the
+    live call entirely rather than asking Gemini a second question with a
+    credential already known to fail it — a rejected key doesn't become valid
+    between two calls in the same request.
     """
     if not evidence_list:
         return ScoreOutcome(scores=[], status=ScoreStatus.LLM_OK, llm_scored=0, heuristic_scored=0, reason=None)
+
+    if known_invalid_key_reason is not None:
+        scores = [_heuristic_score(brief, ev) for ev in evidence_list]
+        return ScoreOutcome(
+            scores=scores, status=ScoreStatus.INVALID_GEMINI_KEY, llm_scored=0,
+            heuristic_scored=len(scores), reason=known_invalid_key_reason,
+        )
 
     try:
         batch = llm.generate_structured(
@@ -175,6 +198,28 @@ def _tokens(text: str | None) -> set[str]:
     return {w for w in words if w and w not in _STOPWORDS}
 
 
+# Longest-first so "distributors" doesn't get incorrectly caught by a
+# shorter suffix before the one that actually produces its true root.
+_SUFFIXES = ("ations", "ation", "ions", "ion", "ers", "ors", "er", "or", "ing", "ed", "es", "s", "e")
+
+
+def _stem(word: str) -> str:
+    """A minimal suffix strip — not a real stemmer, just enough that
+    "distribution"/"distributor"/"distributors" (and similar noun/verb
+    variants of the same root) count as the same term for industry-overlap
+    scoring. Only strips when >=3 characters of root remain, so short words
+    are left alone.
+    """
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            return word[: -len(suffix)]
+    return word
+
+
+def _stemmed_tokens(text: str | None) -> set[str]:
+    return {_stem(w) for w in _tokens(text)}
+
+
 def _heuristic_score(brief: Brief, evidence: dict) -> TargetScore:
     score, reasons = _heuristic(brief, evidence)
     return TargetScore(score, reasons, "heuristic")
@@ -195,18 +240,25 @@ def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
 
     industry = evidence.get("industry")
     if industry:
-        niche_tokens = _tokens(brief.niche_or_industry)
-        overlap = len(niche_tokens & _tokens(industry))
+        niche_tokens = _stemmed_tokens(brief.niche_or_industry)
+        overlap = len(niche_tokens & _stemmed_tokens(industry))
         points = round(60 * overlap / max(1, len(niche_tokens)))
         total += points
         reason_text = (
             f"Industry overlaps with the brief's niche ({overlap} matching term(s))"
             if overlap
-            else "Industry doesn't match the brief's niche or product"
+            # niche_or_industry is the only field this component examines —
+            # brief.product is never read here, so the explanation must not
+            # claim otherwise.
+            else "Industry doesn't match the brief's niche"
         )
         reasons.append(FitReason(reason=reason_text, evidence_key="industry", evidence_value=str(industry)))
 
     employees = evidence.get("employees")
+    if isinstance(employees, bool):
+        employees = None  # bool is an int subclass in Python; not a real count
+    elif not isinstance(employees, int):
+        employees = None  # any other unexpected type (e.g. a string) is unusable, not a crash
     if employees is not None:
         if 100 <= employees <= 600:
             points = 25
@@ -232,16 +284,21 @@ def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
         reasons.append(FitReason(reason=reason_text, evidence_key="country", evidence_value=str(country)))
 
     if not reasons:
-        # No usable evidence field at all (not possible for either current
-        # source, but handled): the "at least one reason" invariant still
-        # holds by citing the one field every candidate always has.
-        name = evidence.get("name") or "this target"
-        reasons.append(
-            FitReason(
-                reason="No structured evidence fields were available to score",
-                evidence_key="name",
-                evidence_value=str(name),
+        # No usable evidence field at all: cite the one thing a real
+        # candidate always has (name) rather than a fabricated placeholder —
+        # citing anything that isn't the literal evidence value would itself
+        # be an ungrounded reason, the exact thing this module exists to
+        # prevent. If even the name is unavailable, there is truly nothing
+        # left to ground a citation to; an honest zero-reason score is
+        # better than inventing one.
+        name = evidence.get("name")
+        if name:
+            reasons.append(
+                FitReason(
+                    reason="No structured evidence fields (industry, size, or country) were available to score",
+                    evidence_key="name",
+                    evidence_value=str(name),
+                )
             )
-        )
 
     return min(100, max(0, total)), reasons

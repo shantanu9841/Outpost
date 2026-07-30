@@ -149,6 +149,33 @@ were confirmed via its actual click handler. Cross-workspace isolation
 reconfirmed directly against `outpost.db` (a different workspace sees none
 of the scored campaign's targets or audit rows).
 
+**Slice 3 hardening pass** closed four gaps found after a route-level
+diagnostic, before Slice 4 could build on top of scoring's error handling: a
+campaign with an invalid Gemini key was making two live Gemini calls in one
+request (intake's, then a redundant second one from scoring re-asking a
+credential already known rejected) — `scoring.score_batch()` now accepts
+`known_invalid_key_reason` and skips its own call entirely when intake
+already established the terminal failure; a malformed/empty Apollo
+organization object could produce a fabricated `name: "this target"`
+citation that didn't match the real (missing) evidence value — Apollo's
+`normalize_evidence` now defaults `name` the same way `Candidate.name`
+already did, and the heuristic's zero-evidence fallback now cites the real
+value or emits zero reasons, never a placeholder; the industry-overlap
+heuristic used exact token matching, so a natural brief like "US
+distributors for magnesium" scored obvious distributors as a poor fit
+purely because "distributors" and "distribution" are different word forms
+— a minimal suffix-stemmer now unifies them, and the no-overlap explanation
+no longer claims to evaluate `brief.product` (which it never reads); and an
+evidence employee count arriving as a string (e.g. `"180"`) raised a
+`TypeError` against `score_batch`'s own "never raises" contract — a new
+`coerce_int()` normalizes numeric evidence fields at the source boundary,
+and `_heuristic()` also guards its own arithmetic defensively. 15 new
+retained tests (72 total) cover all four, including a route-level test
+proving exactly one Gemini HTTP call per request with a rejected key.
+Verified the stemming fix reproduces the exact anchor-table scores
+unchanged (regression guard) while fixing the demonstrated live-phrase gap
+by direct script.
+
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)
 - [x] Slice 1: Workspaces and BYO-key settings

@@ -15,14 +15,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import httpx
 from pydantic import ValidationError
 
 from app import db, llm
 from app.agent import scoring
-from app.agent.scoring import ScoreStatus, TargetScore, _heuristic, _is_grounded
+from app.agent.intake import IntakeStatus
+from app.agent.scoring import ScoreStatus, TargetScore, _heuristic, _is_grounded, _stem
 from app.models import Brief, Candidate, FitAssessment, FitBatch, FitReason
 from app.sources.apollo import normalize_evidence as apollo_normalize_evidence
-from app.sources.base import SourceResult, SourceStatus
+from app.sources.base import SourceResult, SourceStatus, coerce_int
 from app.sources.seed import normalize_evidence as seed_normalize_evidence
 
 
@@ -455,6 +457,235 @@ class ZeroTargetCampaignTests(unittest.TestCase):
         self.assertEqual(db.list_targets(self.workspace_id, campaign_id), [])
         actions = {row["action"] for row in db.list_audit(self.workspace_id, campaign_id)}
         self.assertIn("scoring.skipped_no_targets", actions)
+
+
+# --- Hardening pass: post-Slice-3 findings --------------------------------
+
+
+class FakeGeminiResponse:
+    """A minimal httpx.Response stand-in, enough to drive a rejected-key path."""
+
+    def __init__(self, status_code: int, json_data: dict):
+        self.status_code = status_code
+        self._json_data = json_data
+
+    def json(self):
+        return self._json_data
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise httpx.HTTPStatusError(
+                f"HTTP {self.status_code}",
+                request=httpx.Request("POST", "https://example.test"),
+                response=self,
+            )
+
+
+class KnownInvalidKeyTests(unittest.TestCase):
+    """Finding 1: a Gemini key already rejected during intake must not be
+    asked again during scoring — that's a second live call for an answer
+    intake already has."""
+
+    def test_known_invalid_key_reason_skips_the_llm_call_entirely(self):
+        with mock.patch("app.llm.generate_structured") as mocked:
+            outcome = scoring.score_batch(
+                _canonical_brief(),
+                _two_target_evidence(),
+                {"gemini": "fake"},
+                known_invalid_key_reason="credential rejected during intake",
+            )
+        mocked.assert_not_called()
+        self.assertEqual(outcome.status, ScoreStatus.INVALID_GEMINI_KEY)
+        self.assertEqual(outcome.llm_scored, 0)
+        self.assertEqual(outcome.heuristic_scored, 2)
+        self.assertEqual(outcome.reason, "credential rejected during intake")
+
+    def test_omitted_known_invalid_key_reason_calls_the_llm_as_normal(self):
+        # No regression: without the flag, score_batch behaves exactly as
+        # before (still calls the LLM once for a normal request).
+        with mock.patch("app.llm.generate_structured", return_value=None) as mocked:
+            outcome = scoring.score_batch(_canonical_brief(), _two_target_evidence(), {})
+        mocked.assert_called_once()
+        self.assertEqual(outcome.status, ScoreStatus.NO_GEMINI_KEY)
+
+
+class KnownInvalidKeyRouteTests(unittest.TestCase):
+    """Finding 1, at the route level: one campaign request with a rejected
+    Gemini key must make exactly one live Gemini HTTP call total (intake's),
+    not two (intake's plus a redundant one from scoring)."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._db_patch = mock.patch.object(db, "DB_PATH", Path(self._tmpdir.name) / "outpost.db")
+        self._db_patch.start()
+        self._env_patch = mock.patch.dict(os.environ, {}, clear=False)
+        self._env_patch.start()
+        os.environ.pop("GEMINI_API_KEY", None)
+        db.init()
+
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        self._client_ctx = TestClient(app)
+        self.client = self._client_ctx.__enter__()
+        self.workspace_id = db.create_workspace("Test WS")
+        self.client.cookies.set("workspace_id", str(self.workspace_id))
+        db.save_setting(self.workspace_id, "gemini", "fake-invalid-gemini-key")
+
+    def tearDown(self):
+        self._client_ctx.__exit__(None, None, None)
+        self._env_patch.stop()
+        self._db_patch.stop()
+        self._tmpdir.cleanup()
+
+    def test_one_campaign_request_makes_exactly_one_gemini_call(self):
+        rejected = FakeGeminiResponse(403, {"error": {"message": "credential rejected"}})
+        with mock.patch("app.llm.httpx.post", return_value=rejected) as post:
+            resp = self.client.post(
+                "/campaigns",
+                data={"promoting_what": "US distributors for magnesium", "target_type": "business"},
+                follow_redirects=False,
+            )
+        self.assertEqual(resp.status_code, 303)
+        # Exactly one live call for the whole request — intake's — not a
+        # second one from scoring re-asking a credential already known bad.
+        self.assertEqual(post.call_count, 1)
+
+        campaign_id = int(resp.headers["location"].rsplit("/", 1)[1])
+        actions = {row["action"] for row in db.list_audit(self.workspace_id, campaign_id)}
+        self.assertIn("intake.invalid_gemini_key", actions)
+        self.assertIn("scoring.invalid_gemini_key", actions)
+        targets = db.list_targets(self.workspace_id, campaign_id)
+        self.assertTrue(targets)
+        self.assertTrue(all(t["fit_score"] is not None for t in targets))
+
+
+class ApolloEmptyOrgGroundingTests(unittest.TestCase):
+    """Finding 2: an Apollo organization with no fields at all must not
+    produce a fabricated, ungrounded fallback citation."""
+
+    def test_empty_org_normalizes_to_a_non_blank_name(self):
+        # Mirrors ApolloSource._to_candidate's own "Unknown company" default
+        # for Candidate.name — evidence["name"] must never diverge from it.
+        normalized = apollo_normalize_evidence({})
+        self.assertEqual(normalized["name"], "Unknown company")
+
+    def test_heuristic_on_empty_org_evidence_is_grounded(self):
+        evidence = apollo_normalize_evidence({})  # every field but name is None
+        brief = _canonical_brief()
+        score, reasons = _heuristic(brief, evidence)
+        self.assertEqual(len(reasons), 1)
+        self.assertTrue(_is_grounded(reasons[0], evidence))
+        self.assertEqual(reasons[0].evidence_key, "name")
+        self.assertEqual(reasons[0].evidence_value, "Unknown company")
+
+    def test_fully_blank_evidence_yields_zero_reasons_not_a_fabricated_one(self):
+        # A hypothetical source row with nothing usable at all, not even a
+        # name: honestly reporting "no reasons" beats inventing a citation
+        # that doesn't match the evidence.
+        evidence = {"name": None, "industry": None, "employees": None, "country": None, "domain": None}
+        score, reasons = _heuristic(_canonical_brief(), evidence)
+        self.assertEqual(score, 0)
+        self.assertEqual(reasons, [])
+
+
+class StemmingTests(unittest.TestCase):
+    """Finding 3: exact token matching misses "distributors" vs "distribution";
+    the explanation text must only describe what was actually evaluated."""
+
+    def test_distribution_family_words_share_one_stem(self):
+        stems = {_stem("distribution"), _stem("distributors"), _stem("distributor"), _stem("distribute")}
+        self.assertEqual(len(stems), 1)
+
+    def test_natural_distributors_niche_matches_a_distribution_industry(self):
+        # The exact demo phrasing that previously scored zero industry
+        # overlap purely because of the -tion vs -ors suffix mismatch.
+        brief = Brief(
+            product="magnesium supplements",
+            audience="distributors",
+            tone="Professional",
+            target_type="business",
+            niche_or_industry="US distributors for magnesium",
+            target_countries=["United States"],
+        )
+        evidence = {
+            "name": "Northbridge Distribution Co.",
+            "industry": "Wholesale distribution",
+            "employees": 180,
+            "country": "United States",
+            "domain": "northbridgedist.com",
+        }
+        score, reasons = _heuristic(brief, evidence)
+        industry_reason = next(r for r in reasons if r.evidence_key == "industry")
+        self.assertIn("overlaps", industry_reason.reason)
+        self.assertTrue(_is_grounded(industry_reason, evidence))
+
+    def test_no_overlap_reason_does_not_mention_product(self):
+        # The heuristic never reads brief.product for this component — the
+        # explanation must not claim it does.
+        brief = _canonical_brief()
+        evidence = {
+            "name": "Lakeside Software Studio", "industry": "Consumer mobile apps",
+            "employees": 12, "country": "United States", "domain": "lakesidesoftware.io",
+        }
+        _, reasons = _heuristic(brief, evidence)
+        industry_reason = next(r for r in reasons if r.evidence_key == "industry")
+        self.assertNotIn("product", industry_reason.reason)
+        self.assertIn("niche", industry_reason.reason)
+
+    def test_anchor_scores_are_unchanged_by_stemming(self):
+        # The canonical brief's niche text already matches these industries
+        # verbatim, so stemming must not change the previously-verified
+        # anchor table (regression guard for the stemming change itself).
+        brief = _canonical_brief()
+        for evidence, expected in [
+            (CORNERSTONE, 90), (MERIDIAN, 90), (NORTHBRIDGE, 60),
+            (CASCADE, 40), (IRONCLAD, 40), (SUMMIT, 40), (LAKESIDE, 20),
+        ]:
+            score, _ = _heuristic(brief, evidence)
+            self.assertEqual(score, expected, evidence["name"])
+
+
+class EmployeesCoercionTests(unittest.TestCase):
+    """Finding 4: a non-int employees value must never raise, in
+    normalize_evidence or in the heuristic's own arithmetic."""
+
+    def test_coerce_int_handles_common_shapes(self):
+        self.assertEqual(coerce_int(180), 180)
+        self.assertEqual(coerce_int(180.0), 180)
+        self.assertEqual(coerce_int("180"), 180)
+        self.assertEqual(coerce_int(" 180 "), 180)
+        self.assertIsNone(coerce_int("not a number"))
+        self.assertIsNone(coerce_int(None))
+        self.assertIsNone(coerce_int(True))
+        self.assertIsNone(coerce_int(False))
+
+    def test_apollo_normalize_evidence_coerces_a_string_employee_count(self):
+        raw = {"name": "Acme", "estimated_num_employees": "180"}
+        self.assertEqual(apollo_normalize_evidence(raw)["employees"], 180)
+
+    def test_apollo_normalize_evidence_drops_an_unparseable_employee_count(self):
+        raw = {"name": "Acme", "estimated_num_employees": "a lot"}
+        self.assertIsNone(apollo_normalize_evidence(raw)["employees"])
+
+    def test_heuristic_treats_a_string_employees_value_as_unavailable_not_a_crash(self):
+        # Bypasses normalize_evidence entirely, proving _heuristic's own
+        # defensive guard — not just the upstream fix — holds independently.
+        evidence = {
+            "name": "Acme", "industry": "Wholesale distribution",
+            "employees": "180", "country": "United States", "domain": "acme.com",
+        }
+        score, reasons = _heuristic(_canonical_brief(), evidence)  # must not raise
+        self.assertFalse(any(r.evidence_key == "employees" for r in reasons))
+
+    def test_heuristic_treats_a_bool_employees_value_as_unavailable(self):
+        evidence = {
+            "name": "Acme", "industry": "Wholesale distribution",
+            "employees": True, "country": "United States", "domain": "acme.com",
+        }
+        score, reasons = _heuristic(_canonical_brief(), evidence)  # must not raise
+        self.assertFalse(any(r.evidence_key == "employees" for r in reasons))
 
 
 if __name__ == "__main__":

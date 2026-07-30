@@ -24,6 +24,29 @@ class SourceStatus(str, Enum):
     SEED_ERROR = "seed_error"            # the local seed fallback itself could not load
 
 
+def coerce_int(value: object) -> int | None:
+    """Best-effort int coercion for a normalized evidence field.
+
+    Provider payloads can return a numeric-looking field as a string (or
+    some other unexpected type); scoring's heuristic does arithmetic
+    comparisons on evidence["employees"], so a value that can't be safely
+    read as an int becomes None (evidence treats it as unavailable) rather
+    than raising deep inside scoring.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass
 class SourceResult:
     candidates: list[Candidate]

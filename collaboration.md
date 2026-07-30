@@ -612,3 +612,86 @@ or coding sessions. It complements, but does not replace:
   merged, Slice 4 (drafting, approval queue, pipeline) is next — model
   recommendation and plan review are still owed before that implementation
   begins, per CLAUDE.md.
+
+## 2026-07-31 — Slice 3 hardening: four findings fixed before Slice 4
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 3 hardening (post-implementation findings, requested before
+  starting Slice 4)
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Fixed four findings from the owner's route-level
+  diagnostic of the just-shipped Slice 3 code, each verified against the
+  actual code before changing anything: (1) `scoring.score_batch()` gained
+  a `known_invalid_key_reason` keyword parameter; `create_campaign` now
+  passes `intake_result.reason` through it whenever intake's status was
+  `INVALID_GEMINI_KEY`, so a single campaign request with a rejected key
+  makes exactly one live Gemini call (intake's) instead of two — scoring no
+  longer re-asks a credential already known bad. (2)
+  `apollo.normalize_evidence()`'s `name` field now defaults to "Unknown
+  company" the same way `_to_candidate`'s `Candidate.name` already did (a
+  malformed/empty Apollo organization object previously left
+  `evidence["name"]` as `None` while the heuristic's zero-evidence fallback
+  fabricated a `"this target"` citation that didn't match it — an
+  ungrounded citation from the exact code meant to prevent them); the
+  fallback branch itself was also changed to cite the real
+  `evidence.get("name")` value or emit zero reasons, never a placeholder.
+  (3) `_heuristic()`'s industry-overlap component now compares
+  `_stemmed_tokens()` (a new minimal, longest-suffix-first word stripper —
+  not a real stemmer) instead of exact tokens, so "distributors" and
+  "distribution" count as the same term; the no-overlap explanation text
+  was corrected from "doesn't match the brief's niche or product" to
+  "doesn't match the brief's niche," since `brief.product` was never
+  actually read by this component. (4) `app/sources/base.py` gained
+  `coerce_int()`, used by both sources' `normalize_evidence()` to turn a
+  numeric-looking string or float into an int (or `None`); `_heuristic()`
+  also independently guards its own `employees` handling against a non-int
+  or `bool` value before doing arithmetic, so the "never raises" contract
+  holds even if some future caller's evidence isn't perfectly normalized.
+- Files or areas affected: `app/agent/scoring.py` (the four fixes:
+  `known_invalid_key_reason`, the fallback-citation fix, `_stem`/
+  `_stemmed_tokens`, the employees type guard), `app/main.py`
+  (`create_campaign`'s `known_invalid_reason` computation and pass-through),
+  `app/sources/apollo.py` (`name` default, `coerce_int` on
+  `estimated_num_employees`), `app/sources/seed.py` (`coerce_int` on
+  `employees`), `app/sources/base.py` (new `coerce_int()`),
+  `tests/test_slice3_scoring.py` (15 new tests: `KnownInvalidKeyTests`,
+  `KnownInvalidKeyRouteTests`, `ApolloEmptyOrgGroundingTests`,
+  `StemmingTests`, `EmployeesCoercionTests`), plus this entry, `PROGRESS.md`,
+  and `DECISIONS.md`.
+- Verification: `python -m unittest discover -s tests` — 72 tests passed
+  (40 in `test_slice3_scoring.py` including the 15 new; 32 in
+  `test_slice2_hardening.py`, unchanged and still green — the stemming
+  fix's anchor-table regression guard confirmed all seven canonical-brief
+  scores are unaffected by the change, computed by hand before writing the
+  fix and matched by the retained test). One test
+  (`KnownInvalidKeyRouteTests.test_one_campaign_request_makes_exactly_one_gemini_call`)
+  runs a full `/campaigns` POST through `TestClient` with `app.llm.httpx.post`
+  mocked to a 403 and asserts the mock's call count is exactly 1, directly
+  proving finding 1 is closed at the route level, not just in an isolated
+  unit test. Additionally ran three ad hoc (not retained) sanity scripts
+  directly against the fixed functions to eyeball real output: the exact
+  "US distributors for magnesium" phrasing from finding 3 now shows
+  Northbridge Distribution Co. at 60 (was 40) and Cornerstone Wellness
+  Distributors at 50 (was 30), with corrected reason text; an empty Apollo
+  organization `{}` now normalizes to `name: "Unknown company"` and the
+  heuristic's resulting single reason passes `_is_grounded()` (previously
+  it would not have); `coerce_int` and the heuristic's defensive guard both
+  confirmed via direct calls. No `outpost.db` writes, no real provider
+  calls, no real keys.
+- Known limitations: The stemmer is deliberately minimal (a fixed suffix
+  list, longest-first, with a 3-character-minimum-root guard) and not a
+  real linguistic stemmer — it closes the specific demonstrated gap
+  (distribute/distributor/distribution/distributors) and was checked by
+  hand for a few adjacent words (logistics, wholesale, services) to confirm
+  no obviously wrong collisions, but it is not exhaustively verified
+  against arbitrary English industry vocabulary. The heuristic's
+  fully-degenerate zero-reasons path (finding 2's `test_fully_blank_evidence
+  _yields_zero_reasons_not_a_fabricated_one`) cannot currently be produced
+  by either live source (seed rows always have a name; Apollo's now always
+  defaults to "Unknown company"), so it is a defensive guarantee for a case
+  that shouldn't occur today, not a behavior exercised by any real path.
+- Next action: Owner reviews and merges/pushes this branch as desired. Once
+  merged, Slice 4 (drafting, approval queue, pipeline) is next — model
+  recommendation and plan review are still owed before that implementation
+  begins, per CLAUDE.md.
