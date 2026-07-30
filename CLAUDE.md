@@ -55,3 +55,21 @@ in-app names, give a one-line reason, and stop until I confirm the switch.
 Never reset or delete outpost.db, seed files, or any local state on your
 own. If unexpected data is present, inspect it, back it up, and ask.
 Local data is the user's, not the agent's.
+
+## Collaboration
+Read @collaboration.md at the start of every session. It contains the operating
+rules and handoff log for work shared across SDEs and environments.
+
+Only one SDE may implement on a branch or working tree at a time. A second SDE
+may review or plan, but must not edit concurrently. Before making changes,
+inspect the current branch, latest commit, working-tree status, and the latest
+collaboration entry.
+
+Before every commit, append an entry to collaboration.md describing the changes
+or corrections included, verification performed, known limitations, and next
+action. Include that entry in the same commit. Architectural decisions still
+belong in DECISIONS.md, and slice status still belongs in PROGRESS.md.
+
+Never overwrite, delete, reset, or incorporate another SDE's uncommitted work
+without explicit owner approval. All other build, verification, documentation,
+and commit rules in this file and DECISIONS.md continue to apply.
