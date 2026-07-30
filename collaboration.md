@@ -419,3 +419,94 @@ or coding sessions. It complements, but does not replace:
   desired. Once merged, Slice 3 (fit-scoring with citations, already
   planned in `SLICE_3_PLAN.md`) is next — implementation still needs the
   owner's model-switch confirmation per CLAUDE.md before it begins.
+
+## 2026-07-31 — Slice 3 plan corrected to v2.1 (planning only, no implementation)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 3 (fit-scoring with citations) — planning correction only
+- Role: Planner / Reviewer
+- Implementation status: Not started
+- Changes and corrections: Rewrote `SLICE_3_PLAN.md` end to end in two owner
+  review passes (v2, then v2.1) after the original plan was found to have
+  seven gaps. Confirmed as a precondition that Slice 2 hardening was already
+  committed and the tree clean (`b6aa26e` on this branch, 32 tests green), so
+  correction 1 (finish hardening first) was already satisfied rather than
+  needing new work. v2 corrections: (2) citations are now grounded, not just
+  non-empty — the schema requires an `evidence_key`/`evidence_value` pair plus
+  a non-empty `reason`, and `scoring.py` verifies that pair against the
+  supplied evidence before any score is stored, discarding a fabricated
+  citation to the per-target heuristic; (3) evidence is normalized at the
+  `Source.evidence()` boundary (`normalize_evidence` in both `apollo.py` and
+  `seed.py`, dispatched via a new `sources.evidence_for()`), so scoring never
+  reads provider-specific keys like Apollo's `estimated_num_employees` vs
+  seed's `employees`; (4) and (5) resolved together by an owner-confirmed
+  design fork — scoring moved from a per-target loop to a single batch
+  `FitBatch` LLM call, which bounds latency independent of target count, makes
+  a credential failure a single 403 rather than a retry storm, and lets
+  `add_scored_targets` persist every target and its score in one transaction
+  (with an explicit zero-target branch that skips scoring and audits
+  `scoring.skipped_no_targets`); (6) the verification section was rewritten
+  around a retained `tests/test_slice3_scoring.py` instead of a disposable
+  script, and the plan's file list now explicitly includes updating the
+  Slice 2 6-US-seed-target assertion that the new weak seed company breaks;
+  (7) the heuristic gained exact weights, tokenization, and missing-field
+  rules plus a canonical test brief with an anchor-score table (weak seed
+  scores 20, strongest seeds score 90), and the row-expand control became a
+  real `<button>` with `aria-expanded` and native keyboard support instead of
+  an optional mouse-only row-click. A second owner pass (v2.1) added four more
+  corrections: `_is_grounded` now explicitly rejects a citation whose evidence
+  value is `None` or blank (not just a missing key), closing a gap where
+  `country: None` could have grounded a citation; `add_scored_targets` now
+  guards `len(candidates) == len(scores)` before opening any connection,
+  raising and writing zero rows on a mismatch rather than silently truncating
+  via `zip`; the retained-test list was expanded with explicit missing/
+  duplicate/out-of-range `target_index` cases (the plan's own §4.2 promised
+  this behavior but the original test list only covered one ungrounded-
+  citation case); and a live (not mocked) Gemini batch-scoring verification
+  step was added, since mocks cannot prove Gemini's structured-output
+  validator accepts the new nested `FitBatch` schema — the step reuses the
+  Slice 2 hardening rule of a freshly rotated key pasted through Settings
+  only, located by workspace/length/timestamp, never read or logged. Finally,
+  a full read of the finished v2.1 file surfaced internal cross-reference
+  drift left over from the two correction passes: three citations pointing at
+  §8 (Audit + banner) for content that actually lives in §9 (UI/caret) or §11
+  (Files changed, which is where the two verification subsections actually
+  live); the two verification subsections were mis-numbered as standalone
+  "9-note" headings instead of §11.1/§11.2; and the phrase "worst-status-wins"
+  in the corrections table did not match the plan's actual (and correct)
+  logic of explicit per-target aggregate counts feeding an honest status,
+  rather than any single worst-status selection. All were corrected in place.
+- Files or areas affected: `SLICE_3_PLAN.md` (rewritten to v2.1) and this
+  `collaboration.md` entry. No application code, templates, styles, seeds, or
+  dependency files were touched — this remains a planning-only change.
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of reading every file the plan's corrections
+  reference against the actual committed Slice 2 code (`app/models.py`,
+  `app/sources/base.py`, `app/sources/apollo.py`, `app/sources/seed.py`,
+  `app/agent/intake.py`, `app/llm.py`, `app/db.py`, `app/main.py`,
+  `app/audit_banners.py`, `app/sources/__init__.py`,
+  `app/templates/campaign_detail.html`, `seeds/companies.json`, and
+  `tests/test_slice2_hardening.py`) to ground every correction in what
+  actually exists rather than assumption, followed by a full internal-
+  consistency read of the finished v2.1 document (the pass that found the
+  cross-reference and terminology drift corrected above) and a `grep` confirming
+  no stray `§8`, `9-note`, or `worst-status-wins` references remained.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `b6aa26e` before this commit. `SLICE_3_PLAN.md` is the only file that
+  changed content; the application itself remains at the Slice 2 (hardened)
+  state — Slice 3 has not been implemented.
+- Known limitations: The plan's live-Gemini-batch verification step (whether
+  Gemini's structured-output validator accepts a `FitBatch` schema containing
+  a nested list of objects, each with its own nested list of objects) remains
+  unconfirmed until implementation actually runs it — this is flagged in the
+  plan itself as a required step, not assumed to pass. The heuristic's anchor
+  scores in §4.3 are computed by hand against the current `seeds/companies.json`
+  and the one new weak entry; they have not yet been executed in code.
+- Next action: Owner confirms v2.1 has no further outstanding changes (this
+  commit represents that confirmed state per the owner's instruction to
+  commit). Per collaboration.md rule 6, implementation may then begin on
+  Sonnet (model switch already confirmed in this session) — starting with
+  `app/models.py` (FitReason/FitAssessment/FitBatch), then the source
+  normalization boundary, then `scoring.py`, then the route/DB/audit/UI
+  wiring, then the retained tests in §11.1, then the live-Gemini-batch and
+  computed-style verification in §11.2.
