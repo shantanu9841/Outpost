@@ -8,6 +8,7 @@ is tested is guaranteed to match production.
 """
 
 from app.agent.intake import IntakeStatus
+from app.agent.scoring import ScoreStatus
 from app.sources.base import SourceStatus
 
 DISCOVERY_MAP: dict[SourceStatus, tuple[str, str | None, str | None]] = {
@@ -69,9 +70,33 @@ INTAKE_MAP: dict[IntakeStatus, tuple[str, str | None, str | None]] = {
     ),
 }
 
+SCORING_MAP: dict[ScoreStatus, tuple[str, str | None, str | None]] = {
+    ScoreStatus.LLM_OK: ("scoring.llm_ok", None, None),  # silent on success
+    ScoreStatus.PARTIAL_HEURISTIC: (
+        "scoring.partial_heuristic",
+        "info",
+        "Some targets were scored with the built-in heuristic ({reason}).",
+    ),
+    ScoreStatus.NO_GEMINI_KEY: (
+        "scoring.no_gemini_key",
+        "info",
+        "Fit scored with the built-in heuristic (no Gemini key). Paste a Gemini key in Settings for LLM-scored fit.",
+    ),
+    ScoreStatus.INVALID_GEMINI_KEY: (
+        "scoring.invalid_gemini_key",
+        "warning",
+        "Gemini rejected the scoring request ({reason}). Scored with the built-in heuristic instead — check your Gemini key in Settings.",
+    ),
+    ScoreStatus.GEMINI_ERROR: (
+        "scoring.gemini_error",
+        "warning",
+        "Gemini couldn't complete scoring ({reason}). Scored with the built-in heuristic instead.",
+    ),
+}
+
 BANNER_BY_ACTION: dict[str, tuple[str, str]] = {
     action: (severity, template)
-    for action, severity, template in [*DISCOVERY_MAP.values(), *INTAKE_MAP.values()]
+    for action, severity, template in [*DISCOVERY_MAP.values(), *INTAKE_MAP.values(), *SCORING_MAP.values()]
     if severity is not None
 }
 

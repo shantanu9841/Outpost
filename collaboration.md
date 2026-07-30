@@ -510,3 +510,105 @@ or coding sessions. It complements, but does not replace:
   normalization boundary, then `scoring.py`, then the route/DB/audit/UI
   wiring, then the retained tests in §11.1, then the live-Gemini-batch and
   computed-style verification in §11.2.
+
+## 2026-07-31 — Slice 3 implemented: fit-scoring with grounded citations
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 3 (fit-scoring with citations) — full implementation
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Implemented `SLICE_3_PLAN.md` v2.1 in the order
+  it specified. New: `app/agent/scoring.py` (`ScoreStatus`, `TargetScore`,
+  `ScoreOutcome`, `score_batch()` — one structured `FitBatch` call scoring
+  every discovered target at once; `_apply_batch()` resolving
+  missing/duplicate/out-of-range `target_index` values and grounding every
+  reason via `_is_grounded()` before trusting it; `_heuristic()`, the
+  deterministic fallback with the exact weights the plan specified),
+  `tests/test_slice3_scoring.py` (25 retained tests). Modified:
+  `app/models.py` (`FitReason`/`FitAssessment`/`FitBatch`), `app/sources/
+  apollo.py` and `app/sources/seed.py` (module-level `normalize_evidence()`
+  mapping each provider's own fields to one shared shape; `evidence()` now
+  delegates to it), `app/sources/__init__.py` (`evidence_for()` dispatcher
+  keyed by `source_used`), `app/db.py` (`add_scored_targets` — one
+  connection, one `executemany`, one commit, with the
+  `len(candidates) == len(scores)` guard raising before any connection
+  opens), `app/main.py` (`create_campaign`'s new zero-target branch and
+  batch-scoring step; `campaign_detail`'s `_fit_class()` helper and
+  `fit_reasons` parsing; the banner filter extended to `scoring.*`),
+  `app/audit_banners.py` (`SCORING_MAP` + `BANNER_BY_ACTION` extension),
+  `app/templates/campaign_detail.html` (Fit column; an accessible caret
+  `<button>` with `aria-expanded`/`aria-controls`; a hidden `reasons-row`
+  listing each grounded reason and citation), `app/templates/base.html`
+  (added a `{% block scripts %}` — didn't exist before, needed for the
+  caret's small vanilla-JS toggle), `app/static/css/app.css` (`.fit--high/
+  mid/low`, `.caret` + rotation, `.reasons-row`/`.reason`/
+  `.reason__citation`, `.visually-hidden`, tokens only), `seeds/
+  companies.json` (added `Lakeside Software Studio`, the deliberately weak
+  entry the plan specified), and `tests/test_slice2_hardening.py` (updated
+  the now-invalid six-US-seed-target assertion to read the expected count
+  from the seed file itself, plus new assertions that every target got a
+  fit score and the weak company scores <70). One implementation-time
+  discovery not anticipated by the plan text: the workspace-creation page's
+  form wasn't reachable via this session's browser-automation click/type
+  path (pre-existing Slice 1 code, untouched by this slice) — worked around
+  by creating the one scratch verification workspace directly through
+  `app.db.create_workspace()` (the same DB call the route itself makes) and
+  driving the rest of the verification (workspace switching, campaign
+  intake, results) through the browser normally, where those forms
+  responded correctly to the same interaction methods.
+- Files or areas affected: All files listed in SLICE_3_PLAN.md §11 (new and
+  modified), `app/templates/base.html` (the one file added to that list
+  during implementation, for the scripts block), plus this entry,
+  `PROGRESS.md`, and `DECISIONS.md`.
+- Verification: `python -m unittest discover -s tests` — 57 tests passed
+  (25 new in `test_slice3_scoring.py`, 32 in the updated
+  `test_slice2_hardening.py`), run repeatedly through the session and clean
+  every time. Live, in a scratch workspace ("Slice 3 Verify", created with
+  zero keys): (1) a zero-key business campaign correctly heuristic-scored
+  all 7 US seed targets, with the weak seed lowest (20) and all seven
+  landing in the `fit--low` band for that run's LLM-parsed-then-heuristic
+  brief text (the plan's exact anchor numbers are pinned to the retained
+  tests' fixed canonical brief, not arbitrary live text); the three-banner
+  stack (`intake.no_gemini_key`/`discovery.no_apollo_key`/
+  `scoring.no_gemini_key`) rendered correctly; direct `outpost.db` queries
+  confirmed 7 scored targets with grounded `fit_reasons_json`, and that a
+  different workspace saw none of them. (2) The owner pasted a freshly
+  rotated Gemini key through Settings on that same workspace; this session
+  never read the raw value, confirming only its presence via
+  `length(key_value)` and `created_at`. A second campaign against that live
+  key produced `scoring.llm_ok` — every one of 7 targets LLM-scored with
+  every citation passing `_is_grounded()` against real seed evidence (zero
+  heuristic fallbacks needed) — proving Gemini accepts the new nested
+  `FitBatch` schema, which no mocked test could establish on its own.
+  Confirmed no credential leakage: browser console was empty, `preview_logs`
+  had no `AIza`-prefixed lines, `git diff | grep -i AIza` was clean, and
+  `git log --all -p | grep -i AIza` only matched pre-existing documentation
+  text from the Slice 2 collaboration entry (itself describing this same
+  check), not a real key. (3) Computed-style checks confirmed `.fit--low`
+  resolves to `--text-3` in both light and dark themes (toggled live via
+  `data-theme`). (4) The caret's `aria-expanded`/`hidden` toggle and its 90°
+  rotation transform were confirmed by invoking its real click handler
+  (`button.click()`, which dispatches the same event the addEventListener
+  listens for) after the browser tool's synthetic mouse click failed to
+  register on this particular page in this session — isolated to be a
+  browser-automation quirk on this run, not a code defect, since the
+  identical click handler fired correctly once triggered. Native
+  Enter/Space keyboard support follows from using a real `<button>` element
+  and was not separately re-tested given that guarantee. No `outpost.db`
+  rows were deleted or reset; verification added one new scratch workspace
+  and two campaigns, left in place as normal product data, same as prior
+  slices.
+- Known limitations: The heuristic remains a demo-mode stand-in scored
+  against whatever niche text intake produces for a given brief — its exact
+  point values are anchored and tested against one canonical brief, not
+  guaranteed to reproduce identical numbers for arbitrary live text (this is
+  expected and by design, not a defect). No automated test exercises the
+  live Gemini call itself (by definition, since it needs a real key) — that
+  guarantee rests on this session's one-time manual verification, same
+  category of limitation as Slice 2 hardening's live checks. Drafting, the
+  approval queue, and the pipeline board remain out of scope for this slice
+  and arrive in Slice 4.
+- Next action: Owner reviews and merges/pushes this branch as desired. Once
+  merged, Slice 4 (drafting, approval queue, pipeline) is next — model
+  recommendation and plan review are still owed before that implementation
+  begins, per CLAUDE.md.

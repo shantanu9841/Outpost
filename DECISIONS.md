@@ -160,3 +160,33 @@ Rejected: Leaving `gemini-2.5-flash` configured. Would have shipped hardening wh
 Decision: `tests/test_slice2_hardening.py` uses Python's built-in `unittest` plus `unittest.mock`, both already in the standard library — no new test framework dependency added to `requirements.txt`.
 Why: This is the project's first maintained, retained test module (prior verification was always a disposable script per collaboration.md rule 15). `unittest` covers everything needed here (mocked httpx responses, `fastapi.testclient.TestClient`, a temporary SQLite file) without introducing pytest or any other package, honoring CLAUDE.md's "no new dependency unless necessary."
 Rejected: pytest. More ergonomic for larger suites, but an unnecessary new dependency for 32 tests when unittest already does the job.
+
+## Fit-scoring is one batch LLM call, not a per-target loop
+*2026-07-31*
+Decision: `app/agent/scoring.py`'s `score_batch()` asks Gemini to score every discovered target in a single structured call (`FitBatch`, a list of per-target `FitAssessment`s keyed by `target_index`), rather than calling `generate_structured` once per target.
+Why: A per-target loop over up to 25 targets, each with the existing two-shot retry, could block campaign creation for tens of minutes, and would turn a single rejected credential into a repeated 401/403 storm. One batch call bounds latency independent of target count and makes a credential failure a single call, not a loop — this was an owner-directed correction to the original per-target design during Slice 3 planning review.
+Rejected: Per-target scoring with a concurrency cap and per-call timeout. Would have needed explicit early-abort logic on a credential failure and async/thread-pool machinery for no real benefit here, since a single batch call removes the hazard by construction.
+
+## Fit citations are grounded, not just schema-valid
+*2026-07-31*
+Decision: `FitReason` requires `evidence_key`/`evidence_value` (plus a non-empty `reason`), and `scoring._is_grounded()` checks that pair against the target's actual normalized evidence — key present, value not `None`/blank, and value matching — before a score is ever stored. Any assessment with even one ungrounded reason is discarded, and that single target falls back to the deterministic heuristic (which is grounded by construction, since it only ever cites fields it just read).
+Why: An owner review of the first plan draft pointed out that checking only "is `citation` non-empty" would let a hallucinated citation through unchallenged. A schema can enforce shape but not truth; grounding has to be checked against the real evidence at runtime.
+Rejected: Trusting the schema alone (the original plan). Passed a non-empty-string test but not a "did this actually happen" test.
+
+## Evidence is normalized at the Source.evidence() boundary, not read from raw candidate data
+*2026-07-31*
+Decision: Each source (`apollo.py`, `seed.py`) gained its own `normalize_evidence()` mapping to one shared shape (`name`, `industry`, `employees`, `country`, `domain`); `Source.evidence()` now returns that normalized shape, and `sources.evidence_for(source_used, candidate)` dispatches to the right normalizer without the route holding a live `Source` object.
+Why: Apollo's raw payload uses `estimated_num_employees`; seed rows use `employees`. The original plan had scoring read `candidate.raw` directly, which would have made `scoring.py` know both providers' field names — exactly the per-provider coupling the source-agnostic non-negotiable exists to prevent. Fixed before implementation per owner review.
+Rejected: Deferring normalization to Slice 5 (the original plan's stated simplification). Correction concluded the coupling should never have shipped even for Slice 3's two sources.
+
+## Targets and their fit scores are persisted in one transaction, with a length guard
+*2026-07-31*
+Decision: `db.add_scored_targets()` replaces the create-campaign path's use of `add_targets` (kept only for the existing isolation test). It writes every target row together with its `fit_score`/`fit_reasons_json` in one `executemany`/commit, and raises `ValueError` — writing zero rows — if `len(candidates) != len(scores)`, checked before any connection is opened.
+Why: Separate target-insert and fit-update steps (the original plan's shape) could leave a campaign with some targets scored and others not if the process died in between. The length guard exists so a future refactor that breaks the 1:1 alignment between candidates and scores fails loudly instead of a `zip()`-based insert silently dropping the longer list's tail.
+Rejected: A `zip()`-based insert with no length check. Would silently truncate on a mismatch rather than surfacing the bug.
+
+## Zero discovered targets is an explicit, audited no-op
+*2026-07-31*
+Decision: If discovery returns no candidates, `create_campaign` writes a `scoring.skipped_no_targets` audit row (no banner) and redirects immediately, without calling `score_batch` or `add_scored_targets` at all.
+Why: The original plan didn't say what should happen when discovery yields nothing (e.g. a `SEED_ERROR` with an empty list) — flagged by owner review as an undefined case. An explicit branch keeps the empty-candidates path from ever reaching a batch-scoring call with nothing to score, and keeps the audit trail honest about what actually happened.
+Rejected: Silently falling through to `score_batch([])` without a dedicated audit action. Works (the function does handle an empty list safely), but leaves no record of *why* no scoring audit row exists for that campaign.

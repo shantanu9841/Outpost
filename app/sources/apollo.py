@@ -41,6 +41,22 @@ def _safe_reason(response: httpx.Response, api_key: str) -> str:
     return f"Apollo returned HTTP {response.status_code}"
 
 
+def normalize_evidence(raw: dict) -> dict:
+    """Map Apollo's field names to the source-neutral evidence shape.
+
+    Fit-scoring (app/agent/scoring.py) reads only this shape, never Apollo's
+    own field names — so evidence reads identically regardless of which
+    source produced the target.
+    """
+    return {
+        "name": raw.get("name"),
+        "industry": raw.get("industry"),
+        "employees": raw.get("estimated_num_employees"),
+        "country": raw.get("country"),
+        "domain": raw.get("primary_domain") or raw.get("website_url"),
+    }
+
+
 class ApolloSource(Source):
     name = "apollo"
 
@@ -101,8 +117,9 @@ class ApolloSource(Source):
         return SourceResult(candidates, status, "apollo", "apollo", reason)
 
     def evidence(self, candidate: Candidate) -> dict:
-        # Fit-scoring (Slice 3) reads the firmographics already captured on search.
-        return candidate.raw
+        # Fit-scoring (Slice 3) reads a normalized shape, not Apollo's raw
+        # field names, so scoring never has to know per-provider conventions.
+        return normalize_evidence(candidate.raw)
 
     @staticmethod
     def _to_candidate(org: dict) -> Candidate:

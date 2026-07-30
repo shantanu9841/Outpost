@@ -88,5 +88,14 @@
     "city": "Hamburg",
     "state": "",
     "country": "Germany"
+  },
+  {
+    "name": "Lakeside Software Studio",
+    "domain": "lakesidesoftware.io",
+    "industry": "Consumer mobile apps",
+    "employees": 12,
+    "city": "Madison",
+    "state": "WI",
+    "country": "United States"
   }
 ]

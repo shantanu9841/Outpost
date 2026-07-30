@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import audit_banners, db, sources
-from app.agent import intake
+from app.agent import intake, scoring
 from app.models import TargetType
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -247,11 +247,50 @@ def create_campaign(
     discovery_action, _, _ = audit_banners.DISCOVERY_MAP[discovery_result.status]
     db.add_audit(workspace_id, campaign_id, "agent", discovery_action, detail=discovery_result.reason)
 
-    # 6. Save the returned targets.
-    db.add_targets(workspace_id, campaign_id, discovery_result.candidates, discovery_result.source_used)
+    # 6. Zero-target branch: nothing to score or persist. A neutral audit
+    # record, not a status->banner mapping, so it renders no banner.
+    if not discovery_result.candidates:
+        db.add_audit(workspace_id, campaign_id, "agent", "scoring.skipped_no_targets", detail=None)
+        return RedirectResponse(f"/campaigns/{campaign_id}", status_code=303)
 
-    # 7. Redirect to the campaign-detail route.
+    # 7. Build normalized, source-neutral evidence for every candidate
+    # through the Source.evidence() boundary (never provider-specific keys).
+    evidence_list = [
+        sources.evidence_for(discovery_result.source_used, c) for c in discovery_result.candidates
+    ]
+
+    # 8. Score the whole batch in one LLM call (bounded latency; a rejected
+    # credential is a single 403, never a per-target retry loop).
+    score_outcome = scoring.score_batch(intake_result.brief, evidence_list, settings)
+
+    # 9. Persist targets and their fit scores together, in one transaction —
+    # a campaign is never left partially scored.
+    db.add_scored_targets(
+        workspace_id,
+        campaign_id,
+        discovery_result.candidates,
+        discovery_result.source_used,
+        score_outcome.scores,
+    )
+
+    # 10. Write ONE scoring audit row from the honest aggregate outcome.
+    scoring_action, _, _ = audit_banners.SCORING_MAP[score_outcome.status]
+    db.add_audit(workspace_id, campaign_id, "agent", scoring_action, detail=score_outcome.reason)
+
+    # 11. Redirect to the campaign-detail route.
     return RedirectResponse(f"/campaigns/{campaign_id}", status_code=303)
+
+
+def _fit_class(fit_score: int | None) -> str | None:
+    """Design.md's fit-score coloring band, computed here so the template
+    stays logic-light: >=85 success, 70-84 text, <70 text-3."""
+    if fit_score is None:
+        return None
+    if fit_score >= 85:
+        return "fit--high"
+    if fit_score >= 70:
+        return "fit--mid"
+    return "fit--low"
 
 
 @app.get("/campaigns/{campaign_id}")
@@ -276,13 +315,25 @@ def campaign_detail(
     targets = []
     for t in db.list_targets(workspace_id, campaign_id):
         raw = json.loads(t["raw_json"]) if t["raw_json"] else {}
-        targets.append({**dict(t), "country": raw.get("country")})
+        fit_reasons = json.loads(t["fit_reasons_json"]) if t["fit_reasons_json"] else []
+        targets.append(
+            {
+                **dict(t),
+                "country": raw.get("country"),
+                "fit_reasons": fit_reasons,
+                "fit_class": _fit_class(t["fit_score"]),
+            }
+        )
 
     # Banners are re-derived from the audit trail, not passed through the
-    # URL — the most recent intake.* and discovery.* rows for this campaign.
+    # URL — the most recent intake.*/discovery.*/scoring.* rows for this campaign.
     banners = []
     for row in db.list_audit(workspace_id, campaign_id):
-        if row["action"].startswith("intake.") or row["action"].startswith("discovery."):
+        if (
+            row["action"].startswith("intake.")
+            or row["action"].startswith("discovery.")
+            or row["action"].startswith("scoring.")
+        ):
             banner = audit_banners.banner_for(row["action"], row["detail"])
             if banner is not None:
                 banners.append(banner)

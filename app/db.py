@@ -10,6 +10,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from app.agent.scoring import TargetScore
 from app.models import Candidate
 
 # The database is a single file at the project root, per SPEC.md.
@@ -274,6 +275,56 @@ def add_targets(
                     json.dumps(c.raw),
                 )
                 for c in candidates
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def add_scored_targets(
+    workspace_id: int,
+    campaign_id: int,
+    candidates: list[Candidate],
+    source_name: str,
+    scores: list[TargetScore],
+) -> None:
+    """Insert discovered targets together with their fit scores, atomically.
+
+    candidates and scores must be 1:1 and in the same order. Checked before
+    any connection is opened: a length mismatch raises and writes zero rows,
+    rather than a zip()-based insert silently dropping the longer list's
+    tail. One connection, one executemany, one commit — a campaign is never
+    left with some targets scored and others not.
+    """
+    if len(candidates) != len(scores):
+        raise ValueError("candidates and scores must be the same length")
+
+    conn = get_connection()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO target
+                (workspace_id, campaign_id, source, external_id, name,
+                 handle_or_domain, reach, location, raw_json,
+                 fit_score, fit_reasons_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    workspace_id,
+                    campaign_id,
+                    source_name,
+                    c.external_id,
+                    c.name,
+                    c.handle_or_domain,
+                    c.reach,
+                    c.location,
+                    json.dumps(c.raw),
+                    score.fit_score,
+                    json.dumps([r.model_dump() for r in score.reasons]),
+                )
+                for c, score in zip(candidates, scores)
             ],
         )
         conn.commit()

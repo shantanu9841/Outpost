@@ -366,7 +366,17 @@ class CampaignFormValidationTests(_TempDbTestCase):
         self.assertGreaterEqual(resp.status_code, 400)
         self.assertLess(resp.status_code, 500)
 
-    def test_valid_zero_key_campaign_creates_six_us_seed_targets(self):
+    def test_valid_zero_key_campaign_creates_scored_us_seed_targets(self):
+        # Slice 3 correction: assert the US seed count against the seed file
+        # itself, not a hard-coded literal — Slice 3 added one deliberately
+        # weak company, which changed the US count from 6 to 7. Reading the
+        # file directly means this test doesn't need another manual update
+        # the next time a seed row is added.
+        from app.sources.seed import SEEDS_DIR
+
+        all_companies = json.loads((SEEDS_DIR / "companies.json").read_text(encoding="utf-8"))
+        expected_us_count = sum(1 for c in all_companies if c.get("country") == "United States")
+
         resp = self.client.post(
             "/campaigns",
             data={"promoting_what": "US distributors for magnesium", "target_type": "business"},
@@ -375,12 +385,20 @@ class CampaignFormValidationTests(_TempDbTestCase):
         self.assertEqual(resp.status_code, 303)
         campaign_id = int(resp.headers["location"].rsplit("/", 1)[1])
         targets = db.list_targets(self.workspace_id, campaign_id)
-        self.assertEqual(len(targets), 6)
+        self.assertEqual(len(targets), expected_us_count)
         self.assertTrue(all(t["source"] == "seed" for t in targets))
         self.assertTrue(all(json.loads(t["raw_json"])["country"] == "United States" for t in targets))
+
+        # Slice 3: every target is scored (heuristic path, no Gemini key),
+        # and the deliberately weak seed company lands below 70.
+        self.assertTrue(all(t["fit_score"] is not None for t in targets))
+        weak = next(t for t in targets if t["name"] == "Lakeside Software Studio")
+        self.assertLess(weak["fit_score"], 70)
+
         actions = {row["action"] for row in db.list_audit(self.workspace_id, campaign_id)}
         self.assertIn("intake.no_gemini_key", actions)
         self.assertIn("discovery.no_apollo_key", actions)
+        self.assertIn("scoring.no_gemini_key", actions)
 
 
 class TenantIsolationTests(_TempDbTestCase):

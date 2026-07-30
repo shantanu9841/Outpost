@@ -21,6 +21,22 @@ from app.sources.base import Source, SourceResult, SourceStatus
 SEEDS_DIR = Path(__file__).resolve().parent.parent.parent / "seeds"
 
 
+def normalize_evidence(raw: dict) -> dict:
+    """Map a seed company row to the source-neutral evidence shape.
+
+    Fit-scoring (app/agent/scoring.py) reads only this shape, never a seed
+    row's own field names — so evidence reads identically regardless of
+    which source produced the target.
+    """
+    return {
+        "name": raw.get("name"),
+        "industry": raw.get("industry"),
+        "employees": raw.get("employees"),
+        "country": raw.get("country"),
+        "domain": raw.get("domain"),
+    }
+
+
 class SeedSource(Source):
     name = "seed"
 
@@ -74,7 +90,7 @@ class SeedSource(Source):
         return SourceResult(candidates, status, "seed", "seed", reason)
 
     def evidence(self, candidate: Candidate) -> dict:
-        return candidate.raw
+        return normalize_evidence(candidate.raw)
 
     @staticmethod
     def _to_candidate(company: dict) -> Candidate:

@@ -33,6 +33,7 @@
           <th>Domain</th>
           <th>Country</th>
           <th class="table__num">Size</th>
+          <th class="table__num">Fit</th>
           <th>Source</th>
         </tr>
       </thead>
@@ -43,8 +44,39 @@
           <td>{{ t.handle_or_domain or "—" }}</td>
           <td>{{ t.country or "—" }}</td>
           <td class="table__num mono">{{ t.reach if t.reach is not none else "—" }}</td>
+          <td class="table__num mono {{ t.fit_class or "" }}">
+            {% if t.fit_score is not none %}
+            <button
+              type="button"
+              class="caret"
+              aria-expanded="false"
+              aria-controls="reasons-{{ t.id }}"
+              data-fit-toggle
+            >
+              <span class="visually-hidden">Toggle fit reasons for {{ t.name }}</span>
+              {{ t.fit_score }}
+              <span class="caret__glyph" aria-hidden="true">▸</span>
+            </button>
+            {% else %}
+            —
+            {% endif %}
+          </td>
           <td><span class="badge badge--muted">{{ t.source }}</span></td>
         </tr>
+        {% if t.fit_reasons %}
+        <tr id="reasons-{{ t.id }}" class="reasons-row" hidden>
+          <td colspan="6">
+            <ul class="reasons-list">
+              {% for r in t.fit_reasons %}
+              <li class="reason">
+                {{ r.reason }}
+                <span class="reason__citation">{{ r.evidence_key }}: {{ r.evidence_value }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+          </td>
+        </tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>
@@ -57,4 +89,22 @@
   </section>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Toggle a target's fit-reasons row via its caret button. A native
+  // <button> gives Enter/Space and tab-focus for free; this just flips
+  // aria-expanded and the reasons row's hidden attribute in sync.
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[data-fit-toggle]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var expanded = btn.getAttribute("aria-expanded") === "true";
+        var row = document.getElementById(btn.getAttribute("aria-controls"));
+        btn.setAttribute("aria-expanded", String(!expanded));
+        if (row) row.hidden = expanded;
+      });
+    });
+  });
+</script>
 {% endblock %}

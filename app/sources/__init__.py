@@ -12,10 +12,27 @@ original live-source problem (if any) and the seed failure, and an empty
 candidate list.
 """
 
-from app.models import Brief
+from app.models import Brief, Candidate
 from app.sources.apollo import ApolloSource
+from app.sources.apollo import normalize_evidence as _apollo_evidence
 from app.sources.base import SourceResult, SourceStatus
 from app.sources.seed import SeedSource
+from app.sources.seed import normalize_evidence as _seed_evidence
+
+# Maps a SourceResult.source_used name to that source's normalize_evidence
+# function. Fit-scoring (Slice 3) calls evidence_for() rather than holding a
+# live Source object past discover() — each source still owns its own
+# normalization, so Slice 5's creator sources plug in the same way.
+_EVIDENCE_NORMALIZERS = {
+    "apollo": _apollo_evidence,
+    "seed": _seed_evidence,
+}
+
+
+def evidence_for(source_used: str, candidate: Candidate) -> dict:
+    """Return normalized, source-neutral evidence for one discovered candidate."""
+    normalize = _EVIDENCE_NORMALIZERS[source_used]
+    return normalize(candidate.raw)
 
 
 def discover(brief: Brief, settings: dict[str, str]) -> SourceResult:

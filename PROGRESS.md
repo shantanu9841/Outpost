@@ -78,13 +78,82 @@ call surfaced that `gemini-2.5-flash` is no longer available to new users, so
 was updated to `gemini-3.6-flash` (current stable per ai.google.dev), re-verified
 live to produce a correctly-parsed Brief with `intake.llm_ok` recorded, the key
 masked in Settings, and no key value in console output, audit `detail`, tracked
-files, or git history. Next action: Slice 3 (fit-scoring with citations).
+files, or git history.
+
+Slice 3 adds fit-scoring with grounded citations. `app/models.py` gained
+`FitReason` (`reason`/`evidence_key`/`evidence_value`, all non-blank),
+`FitAssessment` (0-100 `fit_score`, >=1 reason), and `FitBatch` (a list of
+per-target assessments keyed by `target_index`) — the schema the whole slice
+is built around. Both sources gained a `normalize_evidence()` mapping their
+own raw fields (Apollo's `estimated_num_employees`, seed's `employees`) to
+one shared shape (`name`/`industry`/`employees`/`country`/`domain`);
+`Source.evidence()` now returns that normalized shape, and a new
+`sources.evidence_for(source_used, candidate)` dispatches to the right
+normalizer. `app/agent/scoring.py`'s `score_batch()` asks Gemini to score
+every discovered target in **one** structured call (bounded latency, and a
+rejected credential is a single 401/403, never a per-target retry loop);
+every returned citation is checked with `_is_grounded()` against that
+target's real evidence (key present, value not `None`/blank, value
+matching) before being trusted, and any target whose assessment is missing,
+duplicated away, out-of-range, or has even one ungrounded reason falls back
+to a deterministic heuristic (exact weights: industry-overlap 0-60,
+size-band 0-25, country-match 0-15) that is grounded by construction. The
+aggregate outcome (`ScoreStatus`: `LLM_OK`/`PARTIAL_HEURISTIC`/
+`NO_GEMINI_KEY`/`INVALID_GEMINI_KEY`/`GEMINI_ERROR`) is reported honestly,
+never assumed uniform. `create_campaign` extends Slice 2's sequence with an
+explicit zero-target branch (audits `scoring.skipped_no_targets`, no
+scoring call) and, when there are targets, persists them together with
+their fit scores in one transaction via `db.add_scored_targets` (which
+guards `len(candidates) == len(scores)` before opening any connection,
+raising and writing zero rows on a mismatch). A third `SCORING_MAP` in
+`audit_banners.py` renders the outcome as a third stacked banner on
+`/campaigns/{id}`. The target table (Slice 2's schema already had
+`fit_score`/`fit_reasons_json`) needed no migration. The detail table
+gained a right-aligned, mono **Fit** column colored by design.md's band
+(`fit--high`/`fit--mid`/`fit--low`), and each scored row can expand a
+`reasons-row` via a real `<button>` caret with `aria-expanded` (native
+keyboard support, no extra JS needed for Enter/Space). One deliberately
+weak seed company (`Lakeside Software Studio`, 12 employees, an unrelated
+industry) was added to `seeds/companies.json`, changing the US seed count
+from 6 to 7; the Slice 2 test asserting exactly 6 US targets was updated to
+read the expected count from the seed file itself rather than a literal, so
+it won't need another manual update the next time a seed row changes.
+
+Two retained test modules now guard this (57 tests total, `python -m
+unittest discover -s tests`): `tests/test_slice3_scoring.py` (25 tests —
+schema shape, grounding including the `None`/blank-value rejection case,
+heuristic anchor scores against a canonical brief, evidence normalization,
+batch aggregation for ungrounded/missing/duplicate/out-of-range
+`target_index` values, the terminal-credential-failure single-call
+guarantee, atomic persistence + the length guard, and the zero-target
+branch) and the updated `tests/test_slice2_hardening.py` (32 tests, all
+still green). Verified live end-to-end in a scratch workspace ("Slice 3
+Verify"): a zero-key campaign correctly heuristic-scored all 7 US seed
+targets with the weak company lowest (20) and the other six all `fit--low`
+(this run's brief text didn't happen to cross 70, which is expected — the
+heuristic's exact anchor numbers are pinned to the retained tests' fixed
+canonical brief, not to whatever text a live user types); a second campaign
+in the same workspace, run against a freshly rotated Gemini key pasted
+through Settings (never read by this session — confirmed present only by
+`length(key_value)` and `created_at`), produced `scoring.llm_ok` with every
+one of the 7 targets LLM-scored and every citation grounded against real
+seed fields (no heuristic fallback needed) — confirming Gemini accepts the
+new nested `FitBatch` schema, which no mocked test could prove on its own.
+Confirmed no credential leakage: browser console was empty, server logs and
+`git diff`/`git log --all -p` had no `AIza`-prefixed strings (one hit was
+pre-existing documentation text from the Slice 2 collaboration entry, not a
+real key), and Settings shows only the masked placeholder. Computed-style
+checks confirmed `.fit--low` resolves to `--text-3` in both light and dark
+themes, and the caret's `aria-expanded`/`hidden` toggle and 90° rotation
+were confirmed via its actual click handler. Cross-workspace isolation
+reconfirmed directly against `outpost.db` (a different workspace sees none
+of the scored campaign's targets or audit rows).
 
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)
 - [x] Slice 1: Workspaces and BYO-key settings
 - [x] Slice 2: B2B discovery (Apollo)   [load skill: apollo:prospect, apollo:enrich-lead]
-- [ ] Slice 3: Fit-scoring with citations
+- [x] Slice 3: Fit-scoring with citations
 - [ ] Slice 4: Drafting, approval queue, pipeline   [load skill: beautiful-prose, humanizer]
 - [ ] Slice 5: Creator sources and demo mode
 - [ ] Slice 6: Eval and cost-aware routing
