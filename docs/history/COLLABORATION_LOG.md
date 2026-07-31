@@ -1839,3 +1839,71 @@ or coding sessions. It complements, but does not replace:
   and retained fixtures but remains unconfirmed against a live owner dataset.
 - Next action: Commit this correction set, then return to owner review. Slice 6
   remains gated on its required model recommendation and plan confirmation.
+
+## 2026-08-01 — Slice 6 plan created (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 6 (evaluation and cost-aware routing) — planning only
+- Role: Planner
+- Implementation status: Not started (plan under owner review)
+- Changes and corrections: Created `docs/plans/SLICE_6_PLAN.md` on top of the
+  post-fix Slice 5 baseline (`b640b49`, 212 tests). Planning was done on
+  Opus 4.8; the plan recommends Sonnet for execution and asks the owner to
+  confirm the switch at the top of implementation. Four design forks were put
+  to the owner and decided before the plan was written: (1) the escalation
+  tier is a stronger paid Gemini model under strict BYO-key billing —
+  escalation may fire only when the workspace has its own `gemini` key AND has
+  explicitly opted into the paid tier AND the target is high-fit; with no key
+  or no opt-in the app stays fully functional on the zero-cost heuristic/free
+  path and never escalates silently, and any provider charges belong to the
+  workspace owner's own Google project; (2) eval is LLM-as-judge with a
+  deterministic heuristic fallback (the same four-status pattern as
+  intake/scoring/drafting); (3) cost is shown as exact token counts plus a
+  labelled estimated dollar figure from a documented, adjustable, provider-
+  controlled rate table; (4) the exact stronger model id and its pricing are
+  deferred until current official availability is verified — no paid live
+  verification without explicit owner authorization, mocked retained tests
+  otherwise — so escalation is fully built and mocked-tested but physically
+  cannot fire until the owner sets a verified `ESCALATION_MODEL` constant and
+  opts a workspace in. The plan reuses the established slice patterns: the
+  LLM judge returns a Pydantic-validated `EvalResult` with one retry via
+  `llm.py`; `llm.generate_structured` keeps its exact current signature (a new
+  `generate_structured_measured` returns token usage + model, so no Slice 2–5
+  test or caller changes); a new idempotent `eval` table (SPEC §3) and the
+  already-reserved `draft.cost_tokens` are written atomically with the draft
+  and its audit rows; the paid-tier opt-in is stored as a non-masked
+  `paid_tier` `workspace_setting` (recommended, no migration) with a dedicated
+  Settings checkbox; and `routing.py` owns the high-fit gate
+  (`HIGH_FIT_THRESHOLD = 85`, reusing design.md's success band), the
+  confidence early-exit (`CONFIDENCE_THRESHOLD = 80`), the escalation
+  orchestration, and per-outreach cost summation across every LLM call made.
+  Four open decisions are flagged for owner review in the plan's §8 (opt-in
+  storage mechanism; the two threshold defaults; the 4×0–25 eval scale; and
+  whether the escalation-case dollar estimate using the final model's rate is
+  acceptable vs. a stored exact-cost column). Fifteen acceptance criteria,
+  each with at least one mocked retained test, cover cost recording, per-draft
+  eval, the LLM-judge/heuristic split, both no-silent-escalation guards
+  (no key; no opt-in), the high-fit gate, the confidence early-exit, the
+  escalation-unavailable path, cross-call cost summation, atomic creation,
+  the running cost-per-outreach figure, tenant isolation, Slice 2–5 backward
+  compatibility, estimated-$ rendering, and sanitized audit/cost details.
+- Files or areas affected: `docs/plans/SLICE_6_PLAN.md` (new), `collaboration.md`
+  (handoff + recent activity), and this history entry. No application code,
+  tests, templates, styles, seeds, schema, or dependency files were touched.
+- Verification: Documentation-only change; no app code was written or run. The
+  212-test Slice 5 baseline is unchanged. Verified the working tree was clean
+  at `b640b49` before and that only the three intended documentation files are
+  staged.
+- Last known working state: `codex/sde-1-slice-2-hardening` at `b640b49`; the
+  application is unchanged at the Slice 5 completion state. Only these
+  documentation files differ.
+- Known limitations: The stronger model id and pricing are unverified by
+  design (owner-gated, decision 4); every cost/eval/escalation mapping in the
+  plan is to be covered by mocked retained tests during implementation, with
+  any live check requiring explicit owner authorization for a single bounded
+  free-tier call only. The plan's open §8 decisions are not yet resolved.
+- Next action: Owner completes review and resolves the §8 open decisions.
+  After explicit implementation approval and the model-switch confirmation,
+  implementation may begin on Sonnet, starting with the `models.py`/`llm.py`/
+  `eval.py`/`routing.py` core, then the DB/route/UI wiring, then the §6
+  verification. Do not implement until then.
