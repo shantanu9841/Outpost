@@ -563,6 +563,89 @@ class ApifyTransportTests(unittest.TestCase):
         self.assertIn("budget", reason)
         get_mock.assert_not_called()
 
+    def test_poll_budget_is_rechecked_after_the_final_partial_sleep(self):
+        state = {"calls": 0, "time": 0.0}
+        sleeps = []
+
+        def fake_now():
+            state["calls"] += 1
+            if state["calls"] == 2:
+                state["time"] = apify_module.POLL_BUDGET_SECS - 1
+            return state["time"]
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            state["time"] += seconds
+
+        with mock.patch(
+            "app.sources.apify.httpx.post",
+            return_value=_run_response(status="RUNNING"),
+        ), mock.patch("app.sources.apify.httpx.get") as get_mock:
+            source = ApifySource(FAKE_APIFY_KEY, sleep=fake_sleep, now=fake_now)
+            candidates, status, reason = source._run_instagram(_creator_brief())
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(status, SourceStatus.PROVIDER_ERROR)
+        self.assertIn("budget", reason)
+        self.assertEqual(sleeps, [1])
+        get_mock.assert_not_called()
+
+    def test_poll_request_timeout_is_capped_to_the_remaining_budget(self):
+        state = {"calls": 0, "time": 0.0}
+
+        def fake_now():
+            state["calls"] += 1
+            if state["calls"] == 2:
+                state["time"] = 125.0
+            return state["time"]
+
+        def fake_sleep(seconds):
+            state["time"] += seconds
+
+        with mock.patch(
+            "app.sources.apify.httpx.post",
+            return_value=_run_response(status="RUNNING"),
+        ), mock.patch(
+            "app.sources.apify.httpx.get",
+            side_effect=[_run_response(status="SUCCEEDED"), _dataset_response([])],
+        ) as get_mock:
+            source = ApifySource(FAKE_APIFY_KEY, sleep=fake_sleep, now=fake_now)
+            candidates, status, reason = source._run_instagram(_creator_brief())
+
+        self.assertEqual(status, SourceStatus.OK)
+        self.assertEqual(candidates, [])
+        self.assertIsNone(reason)
+        self.assertEqual(get_mock.call_args_list[0].kwargs["timeout"], 22.0)
+        self.assertEqual(get_mock.call_args_list[1].kwargs["timeout"], apify_module.REQUEST_TIMEOUT_SECS)
+
+    def test_poll_response_arriving_after_deadline_is_rejected(self):
+        state = {"calls": 0, "time": 0.0}
+
+        def fake_now():
+            state["calls"] += 1
+            if state["calls"] == 2:
+                state["time"] = 100.0
+            return state["time"]
+
+        def fake_sleep(seconds):
+            state["time"] += seconds
+
+        def finish_after_deadline(*args, **kwargs):
+            state["time"] = apify_module.POLL_BUDGET_SECS + 1
+            return _run_response(status="SUCCEEDED")
+
+        with mock.patch(
+            "app.sources.apify.httpx.post",
+            return_value=_run_response(status="RUNNING"),
+        ), mock.patch("app.sources.apify.httpx.get", side_effect=finish_after_deadline) as get_mock:
+            source = ApifySource(FAKE_APIFY_KEY, sleep=fake_sleep, now=fake_now)
+            candidates, status, reason = source._run_instagram(_creator_brief())
+
+        self.assertEqual(candidates, [])
+        self.assertEqual(status, SourceStatus.PROVIDER_ERROR)
+        self.assertIn("budget", reason)
+        self.assertEqual(get_mock.call_count, 1)
+
     def test_transport_error_at_each_stage_maps_to_network_error(self):
         with mock.patch("app.sources.apify.httpx.post", side_effect=httpx.ConnectTimeout("x")):
             source = ApifySource(FAKE_APIFY_KEY, sleep=lambda s: None, now=_counting_now())
@@ -665,6 +748,26 @@ class YouTubeTransportTests(unittest.TestCase):
         self.assertEqual(result.candidates, [])
         self.assertEqual(get.call_count, 1)  # channels.list never called
 
+    def test_malformed_search_payload_is_provider_error_not_empty_success(self):
+        malformed_responses = [
+            FakeResponse(200, json_error=True),
+            FakeResponse(200, []),
+            FakeResponse(200, {}),
+            FakeResponse(200, {"items": {}}),
+            FakeResponse(200, {"items": [None]}),
+            FakeResponse(200, {"items": [{}]}),
+            FakeResponse(200, {"items": [{"id": {}}]}),
+            FakeResponse(200, {"items": [{"id": {"channelId": "  "}}]}),
+        ]
+
+        for response in malformed_responses:
+            with self.subTest(payload=response._json_data):
+                result, get = self._search([response])
+                self.assertEqual(result.status, SourceStatus.PROVIDER_ERROR)
+                self.assertEqual(result.candidates, [])
+                self.assertIn("unexpected search payload", result.reason)
+                self.assertEqual(get.call_count, 1)
+
 
 # --- 16: platform provenance and rendering ----------------------------------
 
@@ -697,6 +800,44 @@ class PlatformProvenanceTests(_TempDbTestCase):
         platforms = {json.loads(r["raw_json"])["_outpost_platform"] for r in rows}
         self.assertEqual(platforms, {"instagram", "tiktok"})
 
+
+    def test_documented_tiktok_author_meta_shape_normalizes_creator_fields(self):
+        candidate = ApifySource._tiktok_to_candidate(
+            {
+                "authorMeta": {
+                    "id": "6784642169778881542",
+                    "name": "exampleuser",
+                    "nickName": "Example User",
+                    "signature": "Wellness and fitness creator",
+                    "fans": 12500,
+                    "region": "US",
+                }
+            }
+        )
+
+        self.assertEqual(candidate.name, "Example User")
+        self.assertEqual(candidate.handle_or_domain, "exampleuser")
+        self.assertEqual(candidate.external_id, "6784642169778881542")
+        self.assertEqual(candidate.reach, 12500)
+        self.assertEqual(candidate.location, "US")
+        self.assertEqual(
+            sources.evidence_for("apify", "creator", candidate),
+            {
+                "name": "Example User",
+                "niche": "Wellness and fitness creator",
+                "followers": 12500,
+                "country": "US",
+                "handle": "exampleuser",
+                "platform": "tiktok",
+            },
+        )
+        self.assertNotEqual(candidate.name, "Unknown company")
+
+    def test_tiktok_rows_without_creator_metadata_are_rejected(self):
+        for malformed in ({}, {"authorMeta": []}, {"authorMeta": {}}):
+            with self.subTest(payload=malformed):
+                with self.assertRaises(ValueError):
+                    ApifySource._tiktok_to_candidate(malformed)
     def test_campaign_detail_renders_platform_for_every_creator_seed_row(self):
         from fastapi.testclient import TestClient
         from app.main import app

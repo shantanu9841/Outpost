@@ -230,21 +230,35 @@ class ApifySource(Source):
         deadline = self._now() + POLL_BUDGET_SECS
 
         while status not in TERMINAL_RUN_STATUSES:
-            if self._now() >= deadline:
+            remaining = deadline - self._now()
+            if remaining <= 0:
                 raise _ApifyRunError(
                     SourceStatus.PROVIDER_ERROR, "Apify run polling exceeded its wall-clock budget"
                 )
-            self._sleep(POLL_INTERVAL_SECS)
+            self._sleep(min(POLL_INTERVAL_SECS, remaining))
+
+            # Sleeping can consume the final fraction of the budget. Recheck
+            # before opening another connection, and give httpx no more than
+            # the time actually left rather than a fresh 30-second allowance.
+            remaining = deadline - self._now()
+            if remaining <= 0:
+                raise _ApifyRunError(
+                    SourceStatus.PROVIDER_ERROR, "Apify run polling exceeded its wall-clock budget"
+                )
             try:
                 response = httpx.get(
                     f"{API_BASE}/actor-runs/{run_id}",
                     headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=REQUEST_TIMEOUT_SECS,
+                    timeout=min(REQUEST_TIMEOUT_SECS, remaining),
                 )
             except httpx.RequestError as exc:
                 raise _ApifyRunError(
                     SourceStatus.NETWORK_ERROR, f"network error while polling ({type(exc).__name__})"
                 ) from exc
+            if self._now() > deadline:
+                raise _ApifyRunError(
+                    SourceStatus.PROVIDER_ERROR, "Apify run polling exceeded its wall-clock budget"
+                )
             if response.status_code != 200:
                 raise _ApifyRunError(SourceStatus.PROVIDER_ERROR, _safe_reason(response, self.api_key))
             run = self._extract_run(response, "poll")
@@ -298,7 +312,7 @@ class ApifySource(Source):
         return Candidate(
             source="apify",
             external_id=username,
-            name=canonical_name(name),
+            name=canonical_name(name or username, fallback="Unknown creator"),
             handle_or_domain=username,
             reach=coerce_int(item.get("followersCount")),
             location=None,
@@ -309,26 +323,51 @@ class ApifySource(Source):
     def _tiktok_to_candidate(item: dict) -> Candidate:
         if not isinstance(item, dict):
             raise ValueError("TikTok result row was not an object")
-        name = item.get("nickname") or item.get("nickName") or item.get("name")
-        handle = item.get("uniqueId") or item.get("username") or item.get("handle")
+
+        # Current clockworks/tiktok-scraper datasets place profile metadata in
+        # authorMeta. Keep the documented legacy flat aliases as a defensive
+        # compatibility path, but never accept a row with no creator metadata
+        # at all — that would silently persist an "unknown" paid result.
+        author_meta = item.get("authorMeta")
+        if author_meta is not None and not isinstance(author_meta, dict):
+            raise ValueError("TikTok author metadata was not an object")
+        profile = author_meta if isinstance(author_meta, dict) else item
+        if not any(
+            key in profile
+            for key in ("id", "name", "nickName", "nickname", "uniqueId", "username", "handle")
+        ):
+            raise ValueError("TikTok result row had no creator metadata")
+
+        if author_meta is not None:
+            # In authorMeta, name is the username/handle and nickName is the
+            # display name. Prefer the human-readable name for presentation.
+            handle = profile.get("name") or profile.get("uniqueId") or profile.get("username")
+            name = profile.get("nickName") or profile.get("nickname") or handle
+        else:
+            name = profile.get("nickname") or profile.get("nickName") or profile.get("name")
+            handle = profile.get("uniqueId") or profile.get("username") or profile.get("handle")
         handle = handle if isinstance(handle, str) else None
-        followers = item.get("fans")
+        followers = profile.get("fans")
         if followers is None:
-            followers = item.get("followers")
+            followers = profile.get("followers")
+        country = profile.get("region") or profile.get("country")
+        country = country if isinstance(country, str) else None
+        external_id = profile.get("id")
+        external_id = external_id if isinstance(external_id, str) else handle
         raw = {
             "name": name,
-            "bio": item.get("signature") or item.get("bio"),
+            "bio": profile.get("signature") or profile.get("bio"),
             "followers": followers,
-            "country": None,  # generally absent for TikTok profiles
+            "country": country,
             "handle": handle,
             "_outpost_platform": "tiktok",
         }
         return Candidate(
             source="apify",
-            external_id=handle,
-            name=canonical_name(name),
+            external_id=external_id,
+            name=canonical_name(name or handle, fallback="Unknown creator"),
             handle_or_domain=handle,
             reach=coerce_int(followers),
-            location=None,
+            location=country,
             raw=raw,
         )

@@ -1798,3 +1798,44 @@ or coding sessions. It complements, but does not replace:
   routing) per SPEC.md §6 — model recommendation and a plan-mode
   confirmation against SPEC.md are still owed to the owner before that
   slice's implementation begins.
+
+## 2026-07-31 — Slice 5 implementation review corrections
+
+- Contributor/environment: Codex desktop, SDE 2 implementation reviewer and
+  correction implementer, working in
+  `C:\Users\shant\claude_code_projects\Outpost`.
+- Slice: Slice 5 — creator sources and demo mode, post-implementation
+  hardening on top of `b2ddd11`.
+- Role: Review findings confirmed independently, then corrected after the
+  owner's explicit "fix all" instruction.
+- Implementation status: Complete.
+- Changes and corrections: Updated the TikTok converter to parse the current
+  Apify actor's published nested `authorMeta` creator fields (`id`, `name`,
+  `nickName`, `signature`, `fans`, `region`) while retaining defensive flat
+  aliases and rejecting rows with no creator metadata. Creator adapters now
+  use creator-specific identity fallbacks. Changed YouTube search parsing so
+  invalid JSON, non-object bodies, missing/non-list `items`, malformed rows,
+  and missing/blank channel ids map to a typed `PROVIDER_ERROR`; only a valid
+  empty `items` list remains an `OK` empty search. Tightened Apify polling so
+  the deadline is checked after sleep and after the response, and each poll
+  request timeout is capped to the remaining wall-clock budget.
+- Files or areas affected: `app/sources/apify.py`,
+  `app/sources/youtube.py`, `tests/test_slice5_creators.py`, `PROGRESS.md`,
+  `collaboration.md`, and this history entry. No schema, dependency, seed,
+  template, or owner database change.
+- Verification: Added six retained tests: documented nested TikTok mapping,
+  malformed TikTok metadata rejection, malformed YouTube 200 classification,
+  final partial-sleep budget exhaustion, remaining-budget request-timeout
+  capping, and response-after-deadline rejection. Targeted source suite passes
+  19/19. Full suite passes 212/212 via
+  `python -m unittest discover -s tests` (171 pre-Slice-5 tests plus 41 Slice-5
+  tests). `git diff --check` passes; credential-pattern scan and final clean
+  worktree check are required before commit.
+- Last known working state: All Slice 5 zero-key, provider-fallback, scoring,
+  tenant-isolation, audit, provenance, and lifecycle tests pass with the
+  corrected adapters and strict poll deadline.
+- Known limitations: No owner-authorized live Apify/YouTube happy-path run was
+  performed. TikTok normalization is grounded in the current official schema
+  and retained fixtures but remains unconfirmed against a live owner dataset.
+- Next action: Commit this correction set, then return to owner review. Slice 6
+  remains gated on its required model recommendation and plan confirmation.

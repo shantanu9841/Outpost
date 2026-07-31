@@ -4,20 +4,20 @@ Read this at the start of every session. It is a current snapshot, not a chronol
 
 ## Current state
 
-Slices 0–5 are implemented and committed. The retained baseline is **206 passing tests** via:
+Slices 0–5 are implemented and committed. The retained baseline is **212 passing tests** via:
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-(171 pre-Slice-5 tests, unchanged, plus 35 new tests in
+(171 pre-Slice-5 tests, unchanged, plus 41 new tests in
 `tests/test_slice5_creators.py`.)
 
 ## Implemented product
 
 - **Foundation and workspaces:** FastAPI, SQLite, server-rendered HTML, light/dark tokenized design, workspace creation/switching through a cookie, and workspace-scoped settings with masked keys.
 - **B2B discovery:** free-text campaign intake becomes a validated `Brief`; Apollo is the paid B2B source; seeded companies provide the zero-key and provider-failure fallback. Every source returns the shared `SourceResult` contract and preserves the real attempted-source status and sanitized reason.
-- **Creator discovery:** Apify (Instagram + TikTok, merged with partial-success and deterministic failure precedence) when configured, else YouTube when configured, else creator seed — a deterministic priority, never an auto-aggregation. Both providers authenticate via a request header (never a query-param key/token); Apify runs are started, bounded-polled, and fetched with named timeout/item/cost caps, never `run-sync`. Creator seed data (`seeds/creators.json`) spans strong/partial/geographic-mismatch/weak/irrelevant examples so heuristic ranking discrimination is visible with zero keys.
+- **Creator discovery:** Apify (Instagram + TikTok, merged with partial-success and deterministic failure precedence) when configured, else YouTube when configured, else creator seed — a deterministic priority, never an auto-aggregation. Both providers authenticate via a request header (never a query-param key/token); Apify runs are started, strictly wall-clock-bounded while polling, and fetched with named timeout/item/cost caps, never `run-sync`. TikTok normalization follows the actor's documented nested `authorMeta` profile shape with defensive legacy aliases; malformed YouTube success payloads are provider errors rather than false empty successes. Creator seed data (`seeds/creators.json`) spans strong/partial/geographic-mismatch/weak/irrelevant examples so heuristic ranking discrimination is visible with zero keys.
 - **Fit scoring:** Gemini scores a discovered batch in one structured call, with a target-type-aware prompt (creator vs company). Every citation is grounded against normalized provider evidence. Missing, invalid, duplicated, or ungrounded assessments fall back to a deterministic grounded heuristic (target-type-aware: business's industry/size/country components are unchanged; creator adds niche/followers/country components with exact follower bands). No score is persisted without at least one grounded reason.
 - **Drafting and approvals:** Gemini or the deterministic zero-key heuristic produces evidence-referencing drafts, for both business and creator targets. Model drafts pass a runtime grounding gate. A human can save, approve, or reject; approving commits the textarea's current normalized text.
 - **Pipeline:** Approved targets enter queued/contacted/replied/live/declined state transitions. Illegal transitions are controlled conflicts, same-stage requests are no-ops, and stage changes require an approved draft.
@@ -40,6 +40,7 @@ Every tenant-facing database function requires `workspace_id`. `draft` has a par
 
 - Workspace keys and records never cross tenant boundaries.
 - Provider failures degrade to typed, audited fallback behavior without leaking credentials.
+- Successful provider responses are shape-validated: malformed YouTube search payloads and TikTok rows without creator metadata become typed provider errors and can fall back safely instead of persisting empty or synthetic live results.
 - Gemini structured output uses provider-side JSON schema plus local Pydantic validation and one retry.
 - Scoring reads only normalized evidence and persists scores/targets atomically.
 - A rejected Gemini credential is not retried redundantly by later steps in the same request.
@@ -72,10 +73,10 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
   official documentation and covered by mocked retained tests, per
   `docs/plans/completed/SLICE_5_PLAN.md` §5.4/§9 — never deliberately
   reproduced live (quota/billing/plan failures are unsafe to induce).
-- Apify/TikTok's exact output field names (`fans` vs `followers`, `nickname`
-  vs `nickName`) are taken from official schemas and tolerated defensively
-  (a missing field becomes `None`, never a crash); unconfirmed against a real
-  dataset item.
+- Apify/TikTok's published nested `authorMeta` profile shape is covered by a
+  retained provider-shaped test, with documented/legacy aliases tolerated
+  defensively. The mapping is still unconfirmed against an owner-authorized
+  live dataset item.
 - The creator follower bands (10k–500k strong, etc.) are a demo-mode
   heuristic choice, not a calibrated model.
 - No live end-to-end creator discovery run (Apify or YouTube) has been

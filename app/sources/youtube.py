@@ -107,7 +107,12 @@ class YouTubeSource(Source):
         if failure is not None:
             return self._result([], failure, _safe_reason(search_resp, self.api_key))
 
-        channel_ids = self._extract_channel_ids(search_resp)
+        try:
+            channel_ids = self._extract_channel_ids(search_resp)
+        except (ValueError, TypeError):
+            return self._result(
+                [], SourceStatus.PROVIDER_ERROR, "YouTube returned an unexpected search payload"
+            )
         if not channel_ids:
             return self._result([], SourceStatus.OK, None)
 
@@ -151,21 +156,32 @@ class YouTubeSource(Source):
 
     @staticmethod
     def _extract_channel_ids(response: httpx.Response) -> list[str]:
+        """Parse a successful search response without conflating bad data
+        with a legitimate empty result set.
+
+        A valid search response always contains an ``items`` list. Because
+        the request is restricted to ``type=channel``, every row must carry a
+        nonblank ``id.channelId``. Any other shape is a provider payload
+        failure, not evidence that the search found zero channels.
+        """
         try:
             body = response.json()
-        except (ValueError, TypeError):
-            return []
-        items = body.get("items") if isinstance(body, dict) else None
+        except (ValueError, TypeError) as exc:
+            raise ValueError("YouTube search response was not valid JSON") from exc
+        if not isinstance(body, dict):
+            raise ValueError("YouTube search response was not an object")
+        items = body.get("items")
         if not isinstance(items, list):
-            return []
+            raise ValueError("YouTube search response had no items list")
         ids = []
         for item in items:
             if not isinstance(item, dict):
-                continue
+                raise ValueError("YouTube search response contained a malformed item")
             item_id = item.get("id")
             channel_id = item_id.get("channelId") if isinstance(item_id, dict) else None
-            if isinstance(channel_id, str) and channel_id:
-                ids.append(channel_id)
+            if not isinstance(channel_id, str) or not channel_id.strip():
+                raise ValueError("YouTube search item had no channel id")
+            ids.append(channel_id.strip())
         return ids
 
     def _parse_channels(self, response: httpx.Response) -> SourceResult:
@@ -216,7 +232,7 @@ class YouTubeSource(Source):
         return Candidate(
             source="youtube",
             external_id=channel_id,
-            name=canonical_name(title),
+            name=canonical_name(title, fallback="Unknown creator"),
             handle_or_domain=channel_id,
             reach=coerce_int(statistics.get("subscriberCount")),
             location=country if isinstance(country, str) else None,
