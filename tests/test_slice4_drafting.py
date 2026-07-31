@@ -1,12 +1,12 @@
 """Maintained regression tests for Slice 4 (drafting, approval queue, pipeline).
 
-Retained unittest tests (SLICE_4_PLAN.md §11.1), not disposable scripts. Every
+Retained tests (docs/plans/completed/SLICE_4_PLAN.md §11.1), not disposable scripts. Every
 Gemini call is mocked at app.agent.drafting.llm.generate_structured — no real
 provider call, no real key, no outpost.db writes (a temporary SQLite file is
 used wherever a DB is touched). Items 20-21 are the deliberate exception to
 "mocked": they exercise two real, separate sqlite3 connections against the
 same on-disk temp file to prove SQLite's writer serialization actually closes
-the concurrency gaps SLICE_4_PLAN.md §5.1 describes.
+the concurrency gaps docs/plans/completed/SLICE_4_PLAN.md §5.1 describes.
 
 Run: python -m unittest tests.test_slice4_drafting -v
 """

@@ -600,7 +600,7 @@ def get_latest_draft_for_target(workspace_id: int, target_id: int) -> sqlite3.Ro
     """The most recent draft for a target regardless of status, or None.
 
     Used only for the campaign-detail lifecycle CTA (§6.2 of
-    SLICE_4_PLAN.md) — whether any draft has ever existed for this target,
+    docs/plans/completed/SLICE_4_PLAN.md) — whether any draft has ever existed for this target,
     and what its latest status is, including a rejected one (which
     get_active_draft_for_target deliberately excludes).
     """
@@ -687,7 +687,7 @@ def save_draft_body(workspace_id: int, draft_id: int, edited_body: str, actor: s
 
     Validates the body (InvalidDraftBody on blank/over-long) before
     touching the database. The UPDATE's WHERE clause is the concurrency
-    guard (§5.1 of SLICE_4_PLAN.md): two concurrent terminal actions on the
+    guard (§5.1 of docs/plans/completed/SLICE_4_PLAN.md): two concurrent terminal actions on the
     same draft cannot both match it, since SQLite serializes writers and
     re-evaluates WHERE when the write lock is granted.
     """
@@ -830,7 +830,7 @@ def set_target_stage(workspace_id: int, target_id: int, new_stage: str, actor: s
     legally lead to "declined" — a conditional UPDATE only exposes whether
     a row changed, not which stage it changed from. The writer reservation
     is held through the scoped read (which also requires an approved
-    draft — finding 8 of SLICE_4_PLAN.md), transition validation, update,
+    draft — finding 8 of docs/plans/completed/SLICE_4_PLAN.md), transition validation, update,
     and audit insert, so a concurrent request waits and is evaluated
     against the state this transaction commits.
 

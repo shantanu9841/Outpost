@@ -1,92 +1,84 @@
 # Outpost Operating Guide
 
-Read this first, every session. It is the rulebook. The plan lives in @SPEC.md. Current state lives in @PROGRESS.md. History and reasoning live in @DECISIONS.md. The visual system lives in @design.md.
+Read this first every session. It contains permanent product and execution rules. Product scope lives in `SPEC.md`; current state in `PROGRESS.md`; active architectural constraints in `DECISIONS.md`; visual rules in `design.md`; coordination and handoff state in `collaboration.md`.
+
+## Context routing
+
+Read only the context required for the task:
+
+- Every session: `CLAUDE.md`, `PROGRESS.md`, `SPEC.md`, `DECISIONS.md`, and `collaboration.md`.
+- UI or visual work: also read the relevant parts of `design.md`.
+- Planning or implementing a slice: also read that slice's current approved plan and the active decisions it names.
+- Regression work in a completed subsystem: read its completed plan under `docs/plans/completed/` and the relevant entries in `docs/history/`.
+- Historical investigation: load only the relevant decision or collaboration history, not the complete archives by default.
+
+Completed plans and history explain prior reasoning; they are not active instructions unless a current document routes you to them.
+
+When documents conflict, apply this order: current explicit owner instruction; this guide; `SPEC.md`; current approved slice plan; active `DECISIONS.md`; current `PROGRESS.md` and handoff; implemented code and retained tests; historical archives. Stop for owner direction if a material conflict remains.
 
 ## What Outpost is
-A multi-tenant B2B outreach command center. A business logs into its own isolated workspace, describes what it is promoting, and Outpost finds relevant creators (Instagram, TikTok, YouTube) and businesses (distributors, logistics), scores each for fit with cited evidence, drafts personalized outreach, and runs every draft through a human approval queue before anything is sent. It then tracks each target through a pipeline and scores its own draft quality over time.
+
+A multi-tenant B2B outreach command center. A business describes what it promotes; Outpost finds relevant businesses and creators, scores fit with cited evidence, drafts grounded outreach, requires human approval, tracks targets through a pipeline, and later evaluates draft quality and cost.
 
 ## Stack
-- Backend: Python, FastAPI.
-- Database: SQLite, single file at ./outpost.db.
-- Frontend: server-rendered HTML with light vanilla JavaScript. No frontend framework.
-- One repo, run locally. No Docker, no cloud service required to run or demo.
+
+- Python, FastAPI, SQLite.
+- Server-rendered HTML and light vanilla JavaScript.
+- One local repository; no Docker or cloud deployment required.
 
 ## Run and verify
+
 - Install: `pip install -r requirements.txt`
 - Run: `uvicorn app.main:app --reload`
 - Open: http://localhost:8000
-- After every change, start the server and confirm the affected page loads without error. This is the verification loop. Do not report a slice done until you have run it and shown the output.
+- After each change, run proportional automated verification and load the affected page or workflow. Do not report completion without showing the result.
+
+## Non-negotiables
+
+1. **BYO-key.** External services use keys pasted by the owner into workspace settings. Never hardcode, expose, copy between workspaces, or use an agent-owned key.
+2. **Demo mode.** The app must complete with zero keys through free paths and seeded data.
+3. **Source-agnostic.** Discovery depends on the shared Source contract, never directly on one provider.
+4. **Human approval.** Nothing sends automatically. A human edits, approves, or rejects every draft, and every action is audited.
+5. **Structured output.** Model data uses Pydantic schemas, validation, and one parse retry.
+6. **Tenant isolation.** Every tenant row and query is scoped by `workspace_id`; cross-workspace data must never be exposed.
+7. **Atomic audit.** When an action requires an audit row, the state mutation and audit commit together or neither remains.
+8. **Local data belongs to the owner.** Never reset, delete, or silently rewrite `outpost.db`, seed files, credentials, or other local state.
 
 ## Live provider verification
-- External-service keys are workspace-scoped, never global. Before a live test,
-  identify a workspace with the required setting using metadata only
-  (`workspace_id`, workspace name, `key_name`, `length(key_value)`, and
-  `created_at`). Never query raw `key_value` merely to inspect it, and never
-- The approved Gemini verification workspace is currently `Slice 3 Verify`
-  (workspace id `5`). Its stored Gemini setting passed a DB-write-free live
-  `draft_outreach` check against `gemini-3.6-flash` on 2026-07-31 with
-  `DraftStatus.LLM_OK`. Use `db.get_settings(5)` only inside the live
-  verification process and never print the returned settings.
-- A key saved in one workspace is unavailable to every other workspace. For a
-  full UI flow in a different workspace, ask the owner to paste the key through
-  that workspace's Settings page; never duplicate it directly in SQLite.
-- If the approved verification workspace or setting is missing later, stop and
-  ask the owner rather than searching files, environment history, logs, or Git
-  for a credential.
 
-## Non-negotiables (these define the product)
-1. BYO-key. Every paid external service (Apify, Apollo, paid LLMs) is called with a key the user pastes into their workspace settings. Never hardcode a key. Never call a paid service with your own key. Keys are stored per workspace and masked in the UI.
-2. Demo mode. The app must work with zero keys pasted, using the free YouTube source, the free Gemini tier, and seeded sample data. Paid sources activate only when a key is present.
-3. Source-agnostic. Discovery talks to a Source interface, not to any one provider. Adding or swapping a source (YouTube, Apify, Apollo) is a config change, not a rewrite.
-4. Human approves every send. The agent drafts. A human edits, approves, or rejects. Nothing sends automatically. Every action is written to an audit trail.
-5. Structured output. Every model call that returns data uses a Pydantic schema, is validated, and retries on a parse failure.
-6. Multi-tenant isolation. Every row belongs to a workspace. No query ever returns another workspace's data.
+- Keys are workspace-scoped, never global. Locate an eligible workspace using metadata only: workspace id/name, `key_name`, `length(key_value)`, and `created_at`.
+- Never query raw `key_value` merely to inspect it, and never print, log, paste, copy, or commit it. Provider code may consume it via `db.get_settings()` inside the verification process.
+- The currently approved Gemini verification workspace is `Slice 3 Verify` (workspace id `5`). Its setting passed a DB-write-free `draft_outreach` call against `gemini-3.6-flash` on 2026-07-31 with `DraftStatus.LLM_OK`.
+- For a full UI flow in another workspace, ask the owner to paste the key through that workspace's Settings page. Never duplicate it directly in SQLite.
+- If the approved workspace or setting is missing, stop and ask the owner. Do not search files, environment history, logs, or Git for credentials.
 
 ## Not building
-Payments and auto-posting. Do not add Stripe. Do not add posting to any platform. Out of scope, permanently.
+
+Payments and automatic posting or sending are permanently out of scope. Do not add Stripe or platform-posting integrations.
 
 ## Design
-Follow @design.md exactly. Use its tokens as CSS custom properties. Do not invent colors, spacing, or fonts. Light and dark both required.
+
+Follow `design.md` for visual work. Use its tokens; do not invent colors, spacing, or fonts. Light and dark themes are both required.
 
 ## Build discipline
-- One slice at a time, in the order in @SPEC.md. Do not start the next slice until the current one is verified and committed.
-- Use plan mode before writing code for a slice. Confirm the plan against SPEC.md before coding.
-- Start of session: read PROGRESS.md and DECISIONS.md.
-- End of a slice: update PROGRESS.md (what is done, what is next), append any real decision to DECISIONS.md, and commit to git with a clear message.
-- If asked to do something that contradicts a non-negotiable, stop and flag it rather than complying.
+
+- Build one slice at a time in `SPEC.md` order.
+- Use plan mode and confirm the plan against `SPEC.md` before implementation.
+- Do not begin implementation while approved-plan changes are outstanding.
+- Do not silently deviate from approved architecture. Stop for owner approval if implementation requires a material change.
+- Preserve unrelated or uncommitted user/SDE work.
+- A slice is complete only when required documentation is current, verification passes, changes are committed, and the working tree is clean.
 
 ## Code conventions
-- Keep it simple and readable. This project is maintained by a non-technical owner reading with your help. Prefer clear names and short functions over clever code.
-- Comment the why, not the what, and only where it is not obvious.
-- No new dependency unless necessary. If you add one, note it in DECISIONS.md.
 
-## Model selection (ask before every slice)
-Before starting any slice, recommend which model I should run and wait
-for me to switch before proceeding. Principle: use the stronger reasoning
-model for planning and architectural judgment; use the faster model for
-mechanical execution from an approved plan. State the recommendation as
-the first line of every slice, name the current best-fit models by their
-in-app names, give a one-line reason, and stop until I confirm the switch.
+Keep code simple and readable for a non-technical owner. Prefer clear names and short functions. Comment why, not what. Add no dependency unless necessary and record the decision.
 
-## Local data
-Never reset or delete outpost.db, seed files, or any local state on your
-own. If unexpected data is present, inspect it, back it up, and ask.
-Local data is the user's, not the agent's.
+## Model selection
+
+Before each slice, recommend the best available planning and execution models by their in-app names, explain the choice in one line, and wait for the owner to confirm the switch. Use the stronger reasoning model for planning or architectural judgment and the faster model for mechanical execution from an approved plan.
 
 ## Collaboration
-Read @collaboration.md at the start of every session. It contains the operating
-rules and handoff log for work shared across SDEs and environments.
 
-Only one SDE may implement on a branch or working tree at a time. A second SDE
-may review or plan, but must not edit concurrently. Before making changes,
-inspect the current branch, latest commit, working-tree status, and the latest
-collaboration entry.
+Read `collaboration.md` for active roles, ownership, and handoff state. Only one SDE may implement in a working tree at a time; another may review or plan without editing concurrently.
 
-Before every commit, append an entry to collaboration.md describing the changes
-or corrections included, verification performed, known limitations, and next
-action. Include that entry in the same commit. Architectural decisions still
-belong in DECISIONS.md, and slice status still belongs in PROGRESS.md.
-
-Never overwrite, delete, reset, or incorporate another SDE's uncommitted work
-without explicit owner approval. All other build, verification, documentation,
-and commit rules in this file and DECISIONS.md continue to apply.
+Before editing, inspect the branch, latest commit, working-tree status, and current handoff. Before every commit, append the detailed record to `docs/history/COLLABORATION_LOG.md` and update the compact handoff in `collaboration.md`. Product decisions go in `DECISIONS.md`; current state goes in `PROGRESS.md`.

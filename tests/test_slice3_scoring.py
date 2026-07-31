@@ -1,6 +1,6 @@
 """Maintained regression tests for Slice 3 (fit-scoring with citations).
 
-Retained unittest tests, not disposable scripts (SLICE_3_PLAN.md correction
+Retained unittest tests, not disposable scripts (docs/plans/completed/SLICE_3_PLAN.md correction
 6). Every Gemini call is mocked at app.llm.generate_structured — no real
 provider call, no real key, no outpost.db writes (a temporary SQLite file is
 used wherever a DB is touched).
@@ -38,7 +38,7 @@ from app.sources.seed import normalize_evidence as seed_normalize_evidence
 
 
 def _canonical_brief() -> Brief:
-    """The canonical test brief anchoring SLICE_3_PLAN.md §4.3's score table."""
+    """The canonical test brief anchoring docs/plans/completed/SLICE_3_PLAN.md §4.3."""
     return Brief(
         product="magnesium supplements",
         audience="distributors",
@@ -180,7 +180,7 @@ class GroundingTests(unittest.TestCase):
 
 
 class HeuristicAnchorTests(unittest.TestCase):
-    """Test 3: the canonical brief reproduces SLICE_3_PLAN.md §4.3's exact totals."""
+    """Test 3: reproduces docs/plans/completed/SLICE_3_PLAN.md §4.3's exact totals."""
 
     def test_anchor_scores_match_table(self):
         brief = _canonical_brief()

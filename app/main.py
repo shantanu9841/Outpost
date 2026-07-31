@@ -374,7 +374,7 @@ def campaign_detail(
 
 def _draft_cta(target_id: int, latest_draft) -> dict:
     """Maps a target's latest-draft state to a lifecycle call-to-action
-    (SLICE_4_PLAN.md §6.2): Draft outreach / Draft again / a link to the
+    (docs/plans/completed/SLICE_4_PLAN.md §6.2): Draft outreach / Draft again / a link to the
     active draft in Approvals / a link to the target on Pipeline. Never
     links an approved or rejected draft to a queue page that excludes it.
     """
