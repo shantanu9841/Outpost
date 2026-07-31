@@ -1200,3 +1200,16 @@ or coding sessions. It complements, but does not replace:
   and the conditional-`UPDATE` concurrency pattern), then the routes/nav/UI,
   then the §11.1 retained tests (21 items, including the two two-connection
   concurrency tests), then the §11.2 no-key and live-Gemini verification.
+
+## 2026-07-31 — Slice 4 plan corrected to v2.3 (planning only, no implementation)
+
+- Contributor/environment: SDE 2 / Codex desktop.
+- Slice: Slice 4 — drafting, approvals, and pipeline; final planning correction only.
+- Role: Reviewer / planner, editing with the owner's explicit authorization.
+- Implementation status: Not started. No Slice 4 application code was written.
+- Changes and corrections: Corrected the two remaining v2.2 concurrency defects. First, retained conditional `UPDATE ... WHERE ...` plus `cursor.rowcount` for `save_draft_body`, `approve_draft`, and `reject_draft`, where the source state is needed only as a guard. Changed `set_target_stage` to reserve SQLite's writer slot with `BEGIN IMMEDIATE`, then perform the workspace-scoped target read and approved-draft gate, same-stage no-op handling, transition validation, update, truthful `"old -> new"` audit insert, and commit under that one reservation. This preserves the authoritative old stage required by the audit and makes concurrent requests evaluate a serialized committed history. Second, corrected retained concurrency test 21: two identical `queued -> contacted` requests must yield exactly one success and one audit; a `contacted`/`declined` race may validly yield either one transition (`queued -> declined`, with the later contacted request rejected) or two ordered transitions (`queued -> contacted -> declined`), because `contacted -> declined` is legal. The test now accepts only those valid histories and verifies every audit detail against the actual predecessor stage. Revised all affected cross-references, implementation notes, non-negotiables, file responsibilities, test descriptions, and decisions; plan version is now v2.3.
+- Files or areas affected: `SLICE_4_PLAN.md` and this `collaboration.md` entry only. No application code, tests, templates, CSS, schema, `outpost.db`, seed data, `PROGRESS.md`, or `DECISIONS.md` were changed.
+- Verification: Full plan consistency review, targeted stale-wording searches, Markdown/diff checks, and `python -m unittest discover -s tests` (`Ran 100 tests`, `OK`). The future Slice 4 concurrency tests remain specifications until implementation.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD `39eb6c0d0d36eb7ee0fbb9238401813c1a08fc17` before this documentation-only commit. The application remains at the hardened Slice 3 state.
+- Known limitations: `BEGIN IMMEDIATE` uses the existing default SQLite connection timeout. A request that cannot acquire the writer reservation within that timeout may raise `sqlite3.OperationalError: database is locked`; special lock-timeout handling remains intentionally out of scope for this local single-file app. No model/provider or live-Gemini verification is relevant to this planning-only correction.
+- Next action: SDE 1 may implement Slice 4 from v2.3 after the required model checkpoint/reconfirmation, then execute the complete retained automated and manual verification plan before implementation sign-off.

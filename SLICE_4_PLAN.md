@@ -4,16 +4,19 @@ Plan for Slice 4 (SPEC.md §6). This document is the single source of truth for
 Slice 4's design. No implementation has started — this commit contains only
 `SLICE_4_PLAN.md` and a `collaboration.md` log entry.
 
-This is the **v2.2** plan: v1 (`2ded7e9`) was revised to v2 for seven
+This is the **v2.3** plan: v1 (`2ded7e9`) was revised to v2 for seven
 owner-approved SDE 2 corrections (§0.1), to v2.1 for five further
 owner-flagged blocking findings against v2 (§0.2), then to v2.2 for two more
 blocking findings against v2.1 (§0.3) — a real circular import in the shared
 body-length validator, and a concurrency gap where "same transaction" made
 each mutation atomic with its own audit but did not stop two concurrent
-requests from both reading the same pre-mutation state. All fourteen tighten
-Slice 4 toward the non-negotiables (#4 audit, #5 structured output, #6
-isolation) and SPEC §4/§6's "references the cited evidence"; none expand scope
-beyond SPEC.md.
+requests from both reading the same pre-mutation state. v2.3 adds one final,
+stage-specific correction (§0.4): pipeline transitions take an explicit
+`BEGIN IMMEDIATE` lock before reading the old stage, so concurrency is
+serialized and the required `"old -> new"` audit detail is truthful. All
+fifteen corrections tighten Slice 4 toward the non-negotiables (#4 audit, #5
+structured output, #6 isolation) and SPEC §4/§6's "references the cited
+evidence"; none expand scope beyond SPEC.md.
 
 ## 0. Collaboration & model status
 
@@ -23,10 +26,12 @@ beyond SPEC.md.
   applying the `beautiful-prose` and `humanizer` skills to it. The v2 revision
   was likewise a planning-only pass on Opus; **no code had changed.** The v2.1
   and v2.2 revisions — five, then two more, blocking findings against the prior
-  version — were made on **Sonnet** after the owner switched the session; both
-  remain planning-only (**no code has changed**) and every finding was grounded
-  against the actually-committed Slice 2/3 code before being folded in, the
-  same discipline the v2 pass used.
+  version — were made on **Sonnet** after the owner switched the session. The
+  v2.3 stage-concurrency correction was made by **SDE 2 / Codex desktop** after
+  the owner explicitly authorized the plan edit. All four revisions remain
+  planning-only (**no code has changed**) and every finding was grounded
+  against the actually-committed Slice 2/3 code and the plan's own transition
+  map before being folded in.
 - Recommended **execution model: Sonnet** — with the prompt, state machines,
   grounding gate, and atomic-audit design settled here, implementation is
   mechanical. This is the model the owner has already switched to for this
@@ -126,18 +131,31 @@ beyond SPEC.md.
     schema at construction time (§4.1).
 14. **"Same transaction" made a mutation atomic with its own audit row, but
     did not by itself stop two concurrent requests from both reading the same
-    pre-mutation state and both succeeding.** `save_draft_body`, `approve_draft`,
-    `reject_draft`, and `set_target_stage` no longer read the current
-    status/stage in Python and then decide whether to write — each now issues
-    one **conditional `UPDATE ... WHERE ... AND status/stage IN (allowed
-    source states)`** and inspects `cursor.rowcount` to learn, atomically,
-    whether the transition it asked for was actually legal *at the moment the
-    write lock was granted* — not at the moment a prior read happened. This
-    relies on SQLite's own default writer serialization (§5) rather than
-    inventing a new locking scheme, and closes the race where two simultaneous
-    approvals could both read `pending`, both "decide" it was legal, and both
-    write a `draft.approved` audit row. Two new real two-connection retained
-    tests (§11.1) exercise this directly.
+    pre-mutation state and both succeeding.** v2.2 replaced the preliminary
+    Python-side state reads with conditional `UPDATE ... WHERE ...` statements
+    and `cursor.rowcount` checks for all four mutations. That strategy remains
+    the concurrency guard for `save_draft_body`, `approve_draft`, and
+    `reject_draft`, closing the race where simultaneous terminal draft actions
+    could both succeed. v2.3 supersedes only the `set_target_stage` portion with
+    the locked read required for a truthful old-stage audit (§0.4, §5.1). Two
+    real two-connection retained tests (§11.1) exercise both mechanisms.
+
+### 0.4 What changed from v2.2 to v2.3 (final stage-concurrency correction)
+
+15. **Pipeline-stage concurrency now preserves both transition legality and a
+    truthful old-stage audit.** v2.2 applied the conditional-`UPDATE` strategy
+    to `set_target_stage`, but that statement exposed only `rowcount`, not the
+    prior stage needed for the required `"old -> new"` audit detail. Its
+    proposed `contacted`/`declined` race also assumed only one request could
+    succeed, even though `contacted → declined` is a legal subsequent
+    transition. `set_target_stage` now uses `BEGIN IMMEDIATE` before reading
+    the scoped target, approved-draft gate, and current stage; it validates,
+    updates, and audits while holding that write reservation through commit.
+    Draft mutations keep their conditional `UPDATE` guards, because their
+    audit actions do not need a mutable pre-update value. The two-connection
+    stage test now accepts only the transition histories that are actually
+    serializable under `STAGE_TRANSITIONS`, and verifies every audit detail
+    against the real stage that preceded it (§5.1, §11.1).
 
 ---
 
@@ -566,23 +584,22 @@ transaction** as the mutation (correction 7, §8) via a shared internal
 committing; the function commits once at the end, so a mutation and its audit
 row are all-or-nothing.
 
-### 5.1 Concurrency: conditional `UPDATE` + `rowcount`, not read-then-decide (finding 14, §0.3)
+### 5.1 Concurrency: conditional draft updates; locked stage transitions (findings 14–15)
 
 "Same transaction" (above) makes a mutation atomic with **its own audit row**.
 It does not, by itself, stop two concurrent requests from each reading
 `status = 'pending'`, each independently deciding the transition is legal, and
 each writing — which would produce two `draft.approved` audit rows for one
 draft, violating the terminal-state and exactly-once requirements finding 14
-flagged. `save_draft_body`, `approve_draft`, `reject_draft`, and
-`set_target_stage` do **not** read the current status/stage in Python and then
-issue a separate `UPDATE`. Each instead issues **one conditional `UPDATE`**
-whose `WHERE` clause encodes every source state the transition map allows,
-and inspects `cursor.rowcount`:
+flagged. The three draft mutations (`save_draft_body`, `approve_draft`, and
+`reject_draft`) issue **one conditional `UPDATE`** whose `WHERE` clause
+encodes every source state the transition map allows, and inspect
+`cursor.rowcount`:
 
 ```python
 # approve_draft's core statement (illustrative — save_draft_body and
 # reject_draft follow the same shape with a fixed target status and no
-# edited_body logic; set_target_stage's shape is below).
+# edited_body logic).
 cur = conn.execute(
     """
     UPDATE draft
@@ -594,41 +611,40 @@ cur = conn.execute(
 )
 if cur.rowcount == 1:
     # This request's UPDATE is the one that got the write lock while the
-    # row still matched the WHERE clause -- the transition really was legal
-    # at the moment it took effect, not just at some earlier read. Safe to
-    # write the audit row in this same transaction and commit.
+    # row still matched the WHERE clause. Safe to write the audit row in this
+    # same transaction and commit.
     ...
 else:
-    # rowcount == 0: some further read (see below) distinguishes NotFound
-    # from InvalidTransition for the response -- but the mutation itself
-    # already, atomically, did not happen.
+    # A diagnostic read distinguishes NotFound from InvalidTransition; the
+    # mutation itself already, atomically, did not happen.
     ...
 ```
 
 The `edited_body` `CASE` compares `submitted_body` against the draft's own
-**immutable** `body` column (set once at creation, never written by
-`save_draft_body`/`approve_draft`/`reject_draft`) rather than against a prior
-read of `edited_body` — reading an immutable column carries no race, so this
-folds "did the human change the text" into the same atomic statement instead
-of needing a preliminary `SELECT`. (This is a minor, deliberate refinement of
-correction 2's "flags inline edits" wording: the flag now means "differs from
-the originally drafted body," which is race-free and — since it also survives
-a prior Save intact — a clearer signal than "differs from whatever a possibly
-different prior request last saved.")
+**immutable** `body` column rather than against a prior read of mutable
+`edited_body`. This folds "did the human change the original draft" into the
+same atomic statement and preserves the signal after a prior Save.
 
 `save_draft_body` and `reject_draft` follow the identical shape with a fixed
-target `status` and no `CASE`. `set_target_stage` folds the §0.2/finding-8
-approved-draft gate into the **same** atomic statement via a correlated
-`EXISTS`, so there is no preliminary read in the success path at all:
+target `status` and no `CASE`. On `rowcount == 0`, a diagnostic follow-up
+`SELECT` distinguishes a missing/cross-workspace row (`NotFound`) from a
+terminal draft (`InvalidTransition`). The follow-up cannot retroactively
+change the failed conditional update.
+
+`set_target_stage` deliberately uses a different strategy (finding 15, §0.4).
+Unlike a draft action, its audit detail must contain the **mutable prior stage**
+(`"old -> new"`), and more than one source stage can legally lead to
+`declined`. A conditional update exposes only whether a row changed, not which
+stage it changed from. The function therefore reserves the SQLite writer
+before reading:
 
 ```python
-allowed_current = [s for s, nxt in STAGE_TRANSITIONS.items() if new_stage in nxt]
-cur = conn.execute(
-    f"""
-    UPDATE target
-    SET stage = ?
-    WHERE workspace_id = ? AND id = ?
-      AND stage IN ({",".join("?" * len(allowed_current))})
+conn.execute("BEGIN IMMEDIATE")
+row = conn.execute(
+    """
+    SELECT target.stage, target.campaign_id
+    FROM target
+    WHERE target.workspace_id = ? AND target.id = ?
       AND EXISTS (
         SELECT 1 FROM draft
         WHERE draft.workspace_id = target.workspace_id
@@ -636,43 +652,48 @@ cur = conn.execute(
           AND draft.status = 'approved'
       )
     """,
-    (new_stage, workspace_id, target_id, *allowed_current),
+    (workspace_id, target_id),
+).fetchone()
+
+if row is None:
+    conn.rollback()
+    raise NotFound
+
+old_stage = row["stage"]
+if old_stage == new_stage:
+    conn.rollback()
+    return False
+if new_stage not in STAGE_TRANSITIONS[old_stage]:
+    conn.rollback()
+    raise InvalidTransition
+
+conn.execute(
+    "UPDATE target SET stage = ? WHERE workspace_id = ? AND id = ?",
+    (new_stage, workspace_id, target_id),
 )
+_insert_audit(
+    conn, workspace_id, row["campaign_id"], actor,
+    TARGET_STAGE_CHANGED, f"{old_stage} -> {new_stage}", target_id, None,
+)
+conn.commit()
+return True
 ```
 
-On `rowcount == 0` for any of the four functions, the mutation is already,
-atomically, known not to have happened — a **diagnostic** follow-up `SELECT`
-(safe to run after the fact, since it cannot retroactively change what already
-didn't happen) distinguishes the controlled response: row absent/wrong
-workspace → `NotFound`; row present but current state not in the transition's
-allowed set → `InvalidTransition` (409) for a draft action, or (for a stage
-change) `NotFound` if there's no approved draft yet (§3.1) or, if the current
-stage already equals `new_stage`, the same-stage no-op (`False`, no audit,
-correction 1).
+For the three draft functions, the conditional `UPDATE` itself is the
+concurrency guard: SQLite serializes writers and re-evaluates the `WHERE`
+clause when the write lock is granted, so two terminal actions cannot both
+match. For `set_target_stage`, `BEGIN IMMEDIATE` is needed not merely to prevent
+simultaneous writes, but to make the subsequent read of `old_stage`
+authoritative for transition validation and audit detail. The second stage
+request waits, then reads the state committed by the first and is evaluated as
+the next serial action. The reservation remains held through the target update
+and audit insert, so they commit together.
 
-**Why a conditional `UPDATE` instead of `BEGIN IMMEDIATE`:** each of these
-four functions performs exactly one mutating statement (plus, only on success,
-one audit `INSERT`) as its sole write. Python's `sqlite3` module's default
-`isolation_level` (unchanged from the existing `get_connection()`, which sets
-none) begins an implicit transaction lazily, at the first `INSERT`/`UPDATE`/
-`DELETE` — which is exactly this conditional `UPDATE` — and that statement
-itself re-checks the authoritative row state at the instant it acquires
-SQLite's write lock, not at some earlier Python-side read. Two concurrent
-connections' `UPDATE`s on the same row cannot both proceed at once: SQLite
-serializes writers, so the second either sees the row already changed by the
-first (and its `WHERE` clause correctly fails to match, `rowcount == 0`) or
-runs first itself — either way, exactly one succeeds. This holds without an
-explicit `BEGIN IMMEDIATE`, and is simpler to reason about than one, because
-the single statement's `WHERE` clause **is** the concurrency guard — there is
-no separate "read" step whose result could go stale. The subsequent audit
-`INSERT` (same connection, same still-open transaction) cannot be interleaved
-with another writer either, since the write lock taken by the `UPDATE` is held
-until `commit()`. Python's `sqlite3` default connection `timeout` (5 seconds,
-unchanged) is far more than these single-statement transactions ever need to
-wait for each other; a request that still can't acquire the lock inside that
+Python's `sqlite3` default connection timeout (5 seconds, unchanged) applies to
+both strategies. A request that still cannot acquire the lock inside that
 window raises `sqlite3.OperationalError: database is locked`, which is not
-specially handled — an honest limitation of a single-file local SQLite app
-(§12, §13), not something this slice engineers around.
+specially handled — an accepted limitation of this local, single-file SQLite
+app (§12, §13).
 
 Four small typed exceptions signal controlled failures to the routes (kept in
 `db.py`, imported by `main.py` and the tests):
@@ -771,24 +792,22 @@ def list_pipeline_targets(workspace_id) -> list[Row]
     # Both workspace_ids qualified.
 
 def set_target_stage(workspace_id, target_id, new_stage, actor="human") -> bool
-    # Conditional UPDATE ... WHERE stage IN (allowed source stages for
-    # new_stage) AND EXISTS (an approved draft for this target) (§5.1,
-    # finding 14) -- folds the finding-8 approved-draft gate into the same
-    # atomic statement, no preliminary read needed for the success path.
-    # rowcount==1 -> target.stage_changed audit (detail "old -> new") in one
-    # transaction; returns True. rowcount==0 -> a diagnostic read distinguishes:
-    # target missing/cross-workspace/no-approved-draft -> NotFound (identical
-    # response to a missing target; see §3.1's rationale for not distinguishing
-    # the two); current stage already equals new_stage -> no-op, returns False,
-    # NO audit (correction 1); anything else -> InvalidTransition (409).
+    # BEGIN IMMEDIATE before reading (§5.1, finding 15), then one scoped SELECT
+    # that also requires an approved draft. No row -> NotFound (missing,
+    # cross-workspace, or not admitted). While holding the writer reservation:
+    # same stage -> rollback + False/no audit; disallowed transition ->
+    # rollback + InvalidTransition; allowed transition -> UPDATE plus
+    # target.stage_changed audit with the authoritative "old -> new" detail,
+    # then one commit. A concurrent request waits and is evaluated against the
+    # state this transaction commits.
 ```
 
 - The audit row every function writes includes the correct `workspace_id`,
   `campaign_id`, `target_id`, and `draft_id`: the draft functions look up the
   target's `campaign_id` (and `target_id`) via the scoped join in the same
-  transaction; the stage function reads `campaign_id` from the target row
-  (an immutable field once set, so reading it — even after the conditional
-  `UPDATE` above — carries no race).
+  transaction; the stage function reads `campaign_id` and the authoritative
+  old stage after `BEGIN IMMEDIATE`, then keeps the reservation through its
+  update, audit insert, and commit.
 - `STAGES`, `STAGE_SET`, `STAGE_TRANSITIONS`, `DRAFT_STATUSES`, and
   `DRAFT_TRANSITIONS` (§3.1) are module constants in `db.py` — one source of
   truth for the DB guard, the routes, and the tests.
@@ -997,10 +1016,10 @@ phrase or a sensible default, so an unmapped action never crashes the page.
   slice demos start to finish with no keys.
 - **#4 human approves every send + audit:** a draft is inert text until a human
   acts; approve/reject/edit/stage each write **exactly one** audit row **in the
-  same transaction** as the change (§8), and this holds even under two
-  concurrent requests for the same draft or target — the conditional-`UPDATE`
-  design (§5.1, finding 14) means only one request's mutation can ever match,
-  so exactly one audit row is written, never two, and the terminal states
+  same transaction** as the change (§8), and this holds under concurrent
+  requests: draft actions use conditional updates, while stage changes use
+  `BEGIN IMMEDIATE` so each request observes and audits the real stage left by
+  the previous committed request (§5.1, findings 14–15). Terminal states
   (approved/rejected/live/declined) stay genuinely terminal under a race, not
   just under sequential use. **Nothing is ever transmitted** — "approved" is a
   status, and marking "contacted" is the owner recording that *they* reached
@@ -1039,9 +1058,10 @@ phrase or a sensible default, so an unmapped action never crashes the page.
   `drafting.py` to avoid a `models → drafting → models` cycle).
 - `app/db.py` — `draft` table + partial unique index in `init()`; `get_target`
   (finding 9); the §5/§5.1 draft/pipeline functions (atomic mutation+audit,
-  tenancy guard, conditional-`UPDATE` transition guards with `rowcount`
-  checks — finding 14 — body validation via `app.models.validate_draft_body`,
-  the approved-draft gate folded into `set_target_stage`'s own `UPDATE`);
+  tenancy guard, conditional-`UPDATE` draft guards with `rowcount` checks
+  (finding 14), `BEGIN IMMEDIATE` around the stage read/update/audit sequence
+  (finding 15), body validation via `app.models.validate_draft_body`, and the
+  approved-draft gate in `set_target_stage`'s locked scoped read);
   `has_approved_draft` (finding 8); `STAGES`/`STAGE_SET`/`STAGE_TRANSITIONS`/
   `DRAFT_STATUSES`/`DRAFT_TRANSITIONS` constants;
   `NotFound`/`InvalidTransition`/`InvalidDraftBody`/`ActiveDraftExists`
@@ -1183,22 +1203,23 @@ than an in-memory DB.
     `reject_draft` calls, and for one concurrent `approve_draft` +
     `reject_draft` pair on the same `pending` draft (exactly one of the two
     terminal states wins, the other gets `InvalidTransition`).
-21. **Concurrent stage submission cannot bypass the transition machine**
-    (finding 14, §0.3), two sub-cases, both via two separate connections on a
+21. **Concurrent stage submissions are serialized with truthful audit history**
+    (findings 14–15, §§0.3–0.4), two sub-cases, both via separate connections on a
     target with an approved draft, currently `queued`: (a) two threads
     simultaneously call `db.set_target_stage(..., "contacted")` with the
-    *same* requested stage — exactly one returns `True`, the other is a
-    same-stage no-op (`False`, since by the time its `UPDATE` runs the stage
-    already reads `contacted`), and never two `target.stage_changed` audit
-    rows. (b) two threads simultaneously request *different* stages that are
-    each individually legal from `queued` (`"contacted"` and `"declined"` —
-    both are in `STAGE_TRANSITIONS["queued"]`, so this genuinely exercises the
-    race rather than the already-illegal jump item 3 covers) — exactly one
-    succeeds (`True`) and lands the target on whichever stage won; the other
-    raises `InvalidTransition` (not a no-op — its requested stage differs from
-    the one that actually landed), because by the time its `UPDATE` runs the
-    target is no longer `queued`. Either way, the target ends on exactly one
-    of the two requested stages, never both, and never a third.
+    *same* requested stage — exactly one returns `True`, the other waits for
+    the lock and becomes a same-stage no-op (`False`); exactly one
+    `target.stage_changed` row exists with detail `queued -> contacted`.
+    (b) two threads simultaneously request the two stages individually legal
+    from `queued` (`contacted` and `declined`). Only these serial histories are
+    accepted: if `declined` acquires the lock first, it records
+    `queued -> declined` and the later `contacted` request raises
+    `InvalidTransition`; if `contacted` acquires it first, it records
+    `queued -> contacted`, then the later `declined` request is correctly
+    allowed by `STAGE_TRANSITIONS["contacted"]` and records
+    `contacted -> declined`. The test rejects any mixed, duplicated, or
+    incorrectly labeled audit history and proves every detail names the stage
+    that actually preceded its mutation.
 
 ### 11.2 Manual / live verification
 
@@ -1294,21 +1315,16 @@ than an in-memory DB.
     to check "does a non-rejected draft already exist" before every insert
     (redundant with the index itself, and reintroduces the exact race the
     index exists to close). Flagged as a known limitation (§13).
-14. **Concurrency safety for the four mutation functions is a conditional
-    `UPDATE ... WHERE <allowed source states>` plus a `cursor.rowcount` check,
-    not an explicit `BEGIN IMMEDIATE`** (finding 14, §5.1). Alternative: open
-    every mutating function with `conn.execute("BEGIN IMMEDIATE")` to take the
-    write lock before any read. Rejected — with exactly one mutating statement
-    per function, the conditional `UPDATE`'s `WHERE` clause already **is** the
-    concurrency guard (SQLite re-checks it at write-lock time, not at an
-    earlier read), so a second, separate locking step would be redundant
-    machinery for the same guarantee, and would still need the same
-    `rowcount`-style check afterward to know whether the caller's intended
-    transition actually happened. If a future function in this module ever
-    needs more than one mutating statement per transaction, `BEGIN IMMEDIATE`
-    (or a compensating check) should be revisited then — this decision is
-    scoped to functions that mutate exactly one row with exactly one
-    statement.
+14. **Concurrency safety uses two mechanisms matched to the audit contract**
+    (findings 14–15, §5.1). `save_draft_body`, `approve_draft`, and
+    `reject_draft` use conditional `UPDATE ... WHERE status IN (...)` plus
+    `cursor.rowcount`: their audit action identifies the transition and does
+    not require the mutable pre-update status. `set_target_stage` uses
+    `BEGIN IMMEDIATE` before its scoped target/approved-draft read, because its
+    audit detail must include the authoritative mutable old stage and multiple
+    stages may legally transition to `declined`. The reservation is held
+    through validation, update, audit insert, and commit, so concurrent stage
+    requests are evaluated as a truthful serial history.
 15. **`validate_draft_body` lives in `app/models.py`, not `app/agent/drafting.py`**
     (finding 13, §0.3) — closing a real circular import (`models → drafting →
     models`) that v2.1 would have shipped. This is a straightforward
@@ -1369,15 +1385,14 @@ than an in-memory DB.
   matching the SQLite error message, since SQLite does not raise a distinctly
   typed exception per constraint); every other integrity failure propagates
   unmapped rather than being silently treated as a harmless double-submit.
-- The four Slice 4 mutation functions (`save_draft_body`, `approve_draft`,
-  `reject_draft`, `set_target_stage`) enforce their transition guards via a
-  conditional `UPDATE ... WHERE <allowed source states>` plus a
-  `cursor.rowcount` check, not a read-then-decide pattern and not an explicit
-  `BEGIN IMMEDIATE` — the `WHERE` clause is re-evaluated at the moment SQLite
-  grants the write lock, so two concurrent requests for the same draft or
-  target cannot both succeed; only one `rowcount == 1`, and the audit row is
-  written exactly once. `set_target_stage` folds the approved-draft gate into
-  the same statement via a correlated `EXISTS`.
+- The three draft mutation functions (`save_draft_body`, `approve_draft`,
+  `reject_draft`) enforce their transition guards via conditional
+  `UPDATE ... WHERE status IN (...)` plus `cursor.rowcount`. The stage mutation
+  uses `BEGIN IMMEDIATE` before reading the scoped target, approved-draft gate,
+  and old stage; it holds that reservation through validation, update, the
+  truthful `"old -> new"` audit insert, and commit. This split prevents
+  concurrent terminal draft actions from both succeeding while also preserving
+  a serializable, accurately labeled pipeline history.
 - `validate_draft_body` lives in `app/models.py`, called directly by
   `OutreachDraft`'s own field validator (same module) and imported by
   `app/db.py` for human-submitted bodies — not in `app/agent/drafting.py`,
