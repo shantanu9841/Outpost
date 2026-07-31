@@ -1381,3 +1381,37 @@ or coding sessions. It complements, but does not replace:
   no provider call or credential was needed for this deterministic DB fix.
 - Next action: Owner may re-review this narrow correction. Slice 4 is ready for
   sign-off if the committed diff and 171-test result are accepted.
+
+## 2026-07-31 — Live Gemini verification instructions added; Slice 4 gap closed
+
+- Contributor/environment: SDE 2 / Codex desktop.
+- Slice: Cross-session verification guidance and Slice 4 live-provider closure.
+- Role: Reviewer / documentation maintainer, with the owner's explicit request.
+- Implementation status: Documentation complete; no application code changed.
+- Changes and corrections: Added a durable `CLAUDE.md` rule explaining that
+  provider credentials are workspace-scoped rather than global, naming
+  `Slice 3 Verify` (workspace id `5`) as the currently approved Gemini
+  verification workspace, and requiring metadata-only discovery
+  (`length(key_value)`/`created_at`) with no raw-secret inspection, output,
+  logging, copying, or Git storage. Future full UI verification in another
+  workspace must have the owner paste the key through that workspace's
+  Settings page. Updated `PROGRESS.md` to close its stale live-Gemini gap.
+- Files or areas affected: `CLAUDE.md`, `PROGRESS.md`, and this
+  `collaboration.md` entry only. No code, tests, schema, credentials, or
+  local database rows changed.
+- Verification: Before this documentation change, a DB-write-free live
+  `draft_outreach` call used `db.get_settings(5)` without printing the
+  settings and returned `DraftStatus.LLM_OK`,
+  `model_used == "gemini-3.6-flash"`, no fallback, and no error reason.
+  The generated body and credential were not printed. Documentation diff and
+  credential-pattern checks were clean; the previously verified 171-test code
+  state is unchanged.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `1db9676` before this documentation-only commit.
+- Known limitations: The approved workspace id/name is local state and may
+  change; the instruction explicitly requires metadata-only revalidation and
+  owner confirmation if it is absent. Free-tier quota can still produce a
+  future 429 even though today's live call succeeded.
+- Next action: SDE 1 should follow `CLAUDE.md`'s live-provider procedure
+  whenever a slice needs real Gemini verification; no Slice 4 provider gap
+  remains as of this check.

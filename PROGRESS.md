@@ -320,11 +320,15 @@ the text the human actually approved; a save -> revert -> approve regression
 test covers the stored row, Pipeline text, and approval audit detail.
 Computed-style checks confirmed all five `--pl-*` stage pills and the
 Approvals nav count pill (solid `--accent` only when non-zero) resolve
-correctly in both light and dark themes. No live-Gemini drafting
-verification was performed this session (no Gemini key was available) — the
-zero-key heuristic path is fully verified; the LLM path is covered by mocked
-tests only and remains unverified against the real API, flagged the same way
-prior slices flagged their own live-only gaps.
+correctly in both light and dark themes. The previously open live-Gemini
+drafting gap was closed by SDE 2 on 2026-07-31 with a DB-write-free call using
+the workspace-scoped setting in `Slice 3 Verify` (workspace id `5`; only
+`length(key_value)` and `created_at` were inspected, never the credential).
+`draft_outreach` returned `DraftStatus.LLM_OK` with
+`model_used == "gemini-3.6-flash"`, no fallback and no error reason, proving
+the current free-tier key, model endpoint, structured schema, and grounding
+gate work together. `CLAUDE.md` now records how future SDEs must locate and
+use that workspace-scoped setting without exposing or copying the key.
 
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)

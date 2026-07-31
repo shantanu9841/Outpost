@@ -17,6 +17,23 @@ A multi-tenant B2B outreach command center. A business logs into its own isolate
 - Open: http://localhost:8000
 - After every change, start the server and confirm the affected page loads without error. This is the verification loop. Do not report a slice done until you have run it and shown the output.
 
+## Live provider verification
+- External-service keys are workspace-scoped, never global. Before a live test,
+  identify a workspace with the required setting using metadata only
+  (`workspace_id`, workspace name, `key_name`, `length(key_value)`, and
+  `created_at`). Never query raw `key_value` merely to inspect it, and never
+- The approved Gemini verification workspace is currently `Slice 3 Verify`
+  (workspace id `5`). Its stored Gemini setting passed a DB-write-free live
+  `draft_outreach` check against `gemini-3.6-flash` on 2026-07-31 with
+  `DraftStatus.LLM_OK`. Use `db.get_settings(5)` only inside the live
+  verification process and never print the returned settings.
+- A key saved in one workspace is unavailable to every other workspace. For a
+  full UI flow in a different workspace, ask the owner to paste the key through
+  that workspace's Settings page; never duplicate it directly in SQLite.
+- If the approved verification workspace or setting is missing later, stop and
+  ask the owner rather than searching files, environment history, logs, or Git
+  for a credential.
+
 ## Non-negotiables (these define the product)
 1. BYO-key. Every paid external service (Apify, Apollo, paid LLMs) is called with a key the user pastes into their workspace settings. Never hardcode a key. Never call a paid service with your own key. Keys are stored per workspace and masked in the UI.
 2. Demo mode. The app must work with zero keys pasted, using the free YouTube source, the free Gemini tier, and seeded sample data. Paid sources activate only when a key is present.
