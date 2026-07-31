@@ -109,3 +109,48 @@ def banner_for(action: str, detail: str | None) -> tuple[str, str] | None:
         return None
     severity, template = entry
     return severity, template.format(reason=detail or "")
+
+
+# Slice 4 draft/pipeline actions are human/agent actions recorded straight to
+# the audit table, not campaign banners (the banner filter stays intake /
+# discovery / scoring) — but the campaign Activity list (§7.3) needs a human
+# label for every action it renders, including these plus the existing
+# intake/discovery/scoring ones. Explicit map, not enum-string interpolation,
+# same discipline as DISCOVERY_MAP/INTAKE_MAP/SCORING_MAP above.
+DRAFT_CREATED = "draft.created"
+DRAFT_EDITED = "draft.edited"
+DRAFT_APPROVED = "draft.approved"
+DRAFT_REJECTED = "draft.rejected"
+TARGET_STAGE_CHANGED = "target.stage_changed"
+
+ACTION_LABELS: dict[str, str] = {
+    "intake.llm_ok": "Brief parsed",
+    "intake.no_gemini_key": "Brief parsed (heuristic)",
+    "intake.invalid_gemini_key": "Brief parsed (heuristic, Gemini key rejected)",
+    "intake.gemini_error": "Brief parsed (heuristic, Gemini error)",
+    "discovery.apollo_ok": "Discovery ran (Apollo)",
+    "discovery.no_apollo_key": "Discovery ran (seed data)",
+    "discovery.invalid_apollo_key": "Discovery ran (seed data, Apollo key rejected)",
+    "discovery.insufficient_plan": "Discovery ran (seed data, Apollo plan limit)",
+    "discovery.rate_limited": "Discovery ran (seed data, Apollo rate-limited)",
+    "discovery.provider_error": "Discovery ran (seed data, Apollo error)",
+    "discovery.network_error": "Discovery ran (seed data, network error)",
+    "discovery.seed_error": "Discovery failed",
+    "scoring.llm_ok": "Targets scored",
+    "scoring.partial_heuristic": "Targets scored (partially heuristic)",
+    "scoring.no_gemini_key": "Targets scored (heuristic)",
+    "scoring.invalid_gemini_key": "Targets scored (heuristic, Gemini key rejected)",
+    "scoring.gemini_error": "Targets scored (heuristic, Gemini error)",
+    "scoring.skipped_no_targets": "Scoring skipped (no targets)",
+    DRAFT_CREATED: "Draft created",
+    DRAFT_EDITED: "Draft edited",
+    DRAFT_APPROVED: "Draft approved",
+    DRAFT_REJECTED: "Draft rejected",
+    TARGET_STAGE_CHANGED: "Stage changed",
+}
+
+
+def label_for(action: str) -> str:
+    """A human phrase for an audit action, or a sensible default so an
+    unmapped action never crashes the Activity list."""
+    return ACTION_LABELS.get(action, action.replace(".", " ").replace("_", " ").capitalize())

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Approvals — Outpost{% endblock %}
+{% block topbar %}Approvals{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page__header">
+    <h1 class="page__title">Approvals</h1>
+  </div>
+
+  {% if drafts %}
+  <div class="approvals">
+    {% for d in drafts %}
+    <article class="draft-card" id="draft-{{ d.id }}">
+      <div class="draft-card__header">
+        <div class="draft-card__title">
+          <span>{{ d.target_name }}</span>
+          {% if d.target_fit_score is not none %}
+          <span class="badge badge--muted mono {{ d.fit_class or "" }}">Fit {{ d.target_fit_score }}</span>
+          {% endif %}
+          <span class="draft-status draft-status--{{ d.status }}">{{ d.status }}</span>
+        </div>
+        <a class="draft-card__campaign-link" href="/campaigns/{{ d.campaign_id }}">View campaign</a>
+      </div>
+
+      <form method="post" action="/drafts/{{ d.id }}/action" class="draft-card__form">
+        <textarea class="input textarea" name="body" rows="7">{{ d.edited_body or d.body }}</textarea>
+        <div class="draft-card__actions">
+          <button class="btn btn--secondary" type="submit" name="action" value="save">Save</button>
+          <button class="btn btn--primary" type="submit" name="action" value="approve">Approve</button>
+          <button class="btn btn--destructive" type="submit" name="action" value="reject">Reject</button>
+        </div>
+      </form>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <section class="empty">
+    <span class="empty__badge"><span class="empty__dot"></span>Approvals</span>
+    <h1 class="empty__title">No drafts waiting for review.</h1>
+    <p class="empty__body">Draft outreach for a scored target from its campaign page.</p>
+  </section>
+  {% endif %}
+</section>
+{% endblock %}

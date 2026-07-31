@@ -634,3 +634,287 @@ body {
   white-space: nowrap;
   border: 0;
 }
+
+/* Destructive button (design.md: error bg, white foreground) */
+.btn--destructive {
+  background: var(--error);
+  color: var(--accent-fg);
+}
+
+.btn--destructive:hover {
+  filter: brightness(0.93);
+}
+
+/* Nav count pill (side rail) — the Approvals backlog count, per design.md:
+   "the active/backlog count inverts to solid accent" when non-zero. */
+.rail__item--with-count {
+  justify-content: space-between;
+}
+
+.rail__count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
+  color: var(--text-3);
+}
+
+.rail__count--solid {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* Draft/status cell (campaign detail) */
+.target-cta-form {
+  display: inline-flex;
+}
+
+.target-cta-link {
+  font-size: 13px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.target-cta-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* Activity list (campaign detail) */
+.activity__title {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+  letter-spacing: -0.01em;
+  margin: var(--space-8) 0 var(--space-3);
+}
+
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-width: 760px;
+}
+
+.activity__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.activity__item:first-child {
+  border-top: none;
+}
+
+.activity__label {
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.activity__detail {
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity__time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* Approvals queue */
+.approvals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  max-width: 720px;
+}
+
+.draft-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.draft-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.draft-card__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.draft-card__campaign-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.draft-card__campaign-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.draft-card__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.draft-card__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.draft-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--bg-subtle);
+}
+
+.draft-status--edited {
+  color: var(--info);
+  background: var(--info-subtle);
+}
+
+/* Pipeline board */
+.pipeline {
+  display: flex;
+  gap: var(--space-4);
+  overflow-x: auto;
+  padding-bottom: var(--space-2);
+}
+
+.pl-col {
+  flex: 0 0 272px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pl-col__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Pipeline stage pill, per design.md: 9999px radius, 11px/600, 6px dot */
+.pl-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pl-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.pl-pill--queued {
+  color: var(--pl-queued);
+  background: var(--pl-queued-subtle);
+}
+
+.pl-pill--contacted {
+  color: var(--pl-contacted);
+  background: var(--pl-contacted-subtle);
+}
+
+.pl-pill--replied {
+  color: var(--pl-replied);
+  background: var(--pl-replied-subtle);
+}
+
+.pl-pill--live {
+  color: var(--pl-live);
+  background: var(--pl-live-subtle);
+}
+
+.pl-pill--declined {
+  color: var(--pl-declined);
+  background: var(--pl-declined-subtle);
+}
+
+.pl-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pl-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.pl-card__campaign-link {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.pl-card__campaign-link:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.pl-card__draft {
+  font-size: 13px;
+  color: var(--text-2);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.pl-card__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.pl-card__stage-form {
+  display: inline-flex;
+}

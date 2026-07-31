@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Pipeline — Outpost{% endblock %}
+{% block topbar %}Pipeline{% endblock %}
+
+{% block content %}
+<section class="page">
+  <div class="page__header">
+    <h1 class="page__title">Pipeline</h1>
+  </div>
+
+  {% set stage_labels = {"queued": "Queued", "contacted": "Contacted", "replied": "Replied", "live": "Live", "declined": "Declined"} %}
+  {% set has_any = columns.values() | map("length") | sum > 0 %}
+
+  {% if has_any %}
+  <div class="pipeline">
+    {% for stage, targets in columns.items() %}
+    <div class="pl-col">
+      <div class="pl-col__head">
+        <span class="pl-pill pl-pill--{{ stage }}"><span class="pl-pill__dot"></span>{{ stage_labels[stage] }}</span>
+        <span class="badge badge--muted mono">{{ targets|length }}</span>
+      </div>
+      {% for t in targets %}
+      <div class="pl-card" id="target-{{ t.target_id }}">
+        <div class="pl-card__header">
+          <span class="pl-card__name">{{ t.target_name }}</span>
+          {% if t.target_fit_score is not none %}
+          <span class="mono {{ t.fit_class or "" }}">{{ t.target_fit_score }}</span>
+          {% endif %}
+        </div>
+        <a class="pl-card__campaign-link" href="/campaigns/{{ t.campaign_id }}">View campaign</a>
+        <p class="pl-card__draft">{{ t.draft_text }}</p>
+        {% if t.next_stages %}
+        <div class="pl-card__actions">
+          {% for next in t.next_stages %}
+          <form method="post" action="/targets/{{ t.target_id }}/stage" class="pl-card__stage-form">
+            <input type="hidden" name="stage" value="{{ next }}" />
+            <button class="btn btn--secondary btn--small" type="submit">
+              {{ "Decline" if next == "declined" else stage_labels[next] }}
+            </button>
+          </form>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <section class="empty">
+    <span class="empty__badge"><span class="empty__dot"></span>Pipeline</span>
+    <h1 class="empty__title">No approved targets yet.</h1>
+    <p class="empty__body">Approve a draft in Approvals to add its target here.</p>
+  </section>
+  {% endif %}
+</section>
+{% endblock %}

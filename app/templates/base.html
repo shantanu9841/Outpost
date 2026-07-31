@@ -48,6 +48,11 @@
           <a class="rail__item {% if request.url.path == '/' %}rail__item--active{% endif %}" href="/">Home</a>
           {% if workspace %}
           <a class="rail__item {% if request.url.path.startswith('/campaigns') %}rail__item--active{% endif %}" href="/campaigns">Campaigns</a>
+          <a class="rail__item rail__item--with-count {% if request.url.path == '/approvals' %}rail__item--active{% endif %}" href="/approvals">
+            <span>Approvals</span>
+            <span class="rail__count {% if approvals_count %}rail__count--solid{% endif %}">{{ approvals_count }}</span>
+          </a>
+          <a class="rail__item {% if request.url.path == '/pipeline' %}rail__item--active{% endif %}" href="/pipeline">Pipeline</a>
           <a class="rail__item {% if request.url.path == '/settings' %}rail__item--active{% endif %}" href="/settings">Settings</a>
           {% endif %}
         </nav>

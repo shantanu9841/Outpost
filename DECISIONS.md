@@ -238,3 +238,57 @@ Rejected: The product-overlap exclusion (removed, not merely disabled) — it do
 Decision: `coerce_int()` now checks `math.isfinite()` before converting a float, and additionally requires the float be integral (`value == int(value)`) — `180.0` becomes `180`, but `180.5`, `float("nan")`, `float("inf")`, and `float("-inf")` all become `None`.
 Why: `int(float("nan"))` and `int(float("inf"))` both raise in plain Python (`ValueError`/`OverflowError`), which a route-level diagnostic pointed out contradicted `coerce_int`'s own "never raises" purpose. A non-integral float like `180.5` was previously silently truncated to `180` by plain `int()` — technically non-raising, but guessing at a fractional employee count via truncation could misrepresent the evidence, so it's treated the same as any other value that can't be honestly read as an int: unavailable, not a guess.
 Rejected: Truncating non-integral floats (the original behavior) — non-raising isn't the same as honest; inventing a plausible-looking int from an ambiguous value is its own small dishonesty.
+
+## Draft status and target stage are two separate state machines, enforced in the database
+*2026-07-31*
+Decision: `app/db.py` defines `DRAFT_TRANSITIONS` and `STAGE_TRANSITIONS` as module constants, shared by every DB mutation, route, and test. Approving a draft is the one event that admits its target to the pipeline board — `set_target_stage` requires a workspace-scoped approved draft to exist before evaluating any transition at all, resolving to the same `NotFound` as a missing/cross-workspace target rather than a distinguishable status.
+Why: Enum membership alone (a valid `stage` value) isn't the same guarantee as a legal transition — `queued -> live` is a real jump that must fail even though `live` is valid. Treating "not yet admitted" the same as "not found" avoids the response itself confirming a target exists in another state.
+Rejected: A dedicated `NotAdmitted` exception mapped to its own status code. The two cases share the same correct user action (there's nothing to advance) and distinguishing them provides no product value here.
+
+## Each Slice 4 mutation commits its audit row in the same transaction as the change
+*2026-07-31*
+Decision: `save_draft_body`, `approve_draft`, `reject_draft`, and `set_target_stage` each write their audit row via a shared `_insert_audit(conn, ...)` helper on the same open connection as the mutation, committing once. The pre-existing `add_audit` (Slice 2/3's separate-connection call) now delegates to the same helper.
+Why: Non-negotiable #4 requires every action to be audited, which a separate connection/commit after the mutation can't guarantee atomically — a crash between the two would leave a state change with no audit row. Slice 2/3's discovery/intake/scoring audits stayed on the separate-call pattern since nothing about them needed the stronger guarantee retroactively.
+Rejected: Leaving the audit write as a separate `add_audit` call after each mutation, matching Slice 2/3. Correct there; insufficient for a human-approval action where the audit trail *is* the compliance record.
+
+## Draft mutations use conditional UPDATE + rowcount; the stage mutation uses BEGIN IMMEDIATE
+*2026-07-31*
+Decision: `save_draft_body`, `approve_draft`, and `reject_draft` each issue one `UPDATE ... WHERE status IN (...)` and check `cursor.rowcount` to detect whether their own request won. `set_target_stage` instead opens with `BEGIN IMMEDIATE`, reads the scoped target and its approved-draft gate under that write reservation, and holds it through validation, the update, and the audit insert.
+Why: A conditional `UPDATE` alone stops two concurrent terminal draft actions from both succeeding (SQLite re-evaluates the `WHERE` clause when the write lock is granted), but it only exposes whether a row changed — not which value it changed from. The stage audit's required `"old -> new"` detail needs that prior value to be authoritative, and more than one stage can legally lead to `declined`, so `BEGIN IMMEDIATE` plus a locked read is the mechanism that keeps concurrent stage requests both race-free and truthfully audited.
+Rejected: Using `BEGIN IMMEDIATE` everywhere for consistency. Unnecessary for the three draft mutations, whose audit doesn't need a mutable pre-update value — the lighter conditional-UPDATE mechanism is sufficient and was verified by two real two-connection tests per mechanism.
+
+## Approving a draft commits whatever the textarea currently holds
+*2026-07-31*
+Decision: `approve_draft`'s `UPDATE` includes `edited_body = CASE WHEN ? = body THEN edited_body ELSE ? END`, comparing the submitted text against the draft's own immutable `body` column in the same statement — not a prior read of the mutable `edited_body`. Approve never requires a prior Save.
+Why: A human who types a change and clicks Approve directly, without pressing Save first, must not lose that edit — "a human approves every send" (non-negotiable #4) should mean the text they actually saw and approved, not a stale saved version.
+Rejected: Requiring Save before Approve is enabled. Adds a UI-enforced step for no correctness benefit, since the same-statement CASE captures the edit correctly regardless.
+
+## LLM drafts are grounded against the target's stored Slice 3 evidence, not just schema-valid
+*2026-07-31*
+Decision: `OutreachDraft` carries the one evidence key/value the model built its message on; `app/agent/drafting._is_draft_grounded` checks that pair against the target's stored `fit_reasons_json` (Slice 3's already-verified grounded citations), confirms the body's text actually uses that value, and requires the recipient be named when a meaningful identity exists. A schema-valid but ungrounded draft (fabricated pair, another target's evidence, or an unused value) falls back to the deterministic heuristic.
+Why: `generate_structured`'s two-shot retry validates JSON/schema shape, not truth — a model can return a perfectly well-formed `OutreachDraft` citing a fact it invented. Reusing Slice 3's already-verified evidence as the ground truth (rather than re-deriving grounding from scratch) means a drafted message can only ever reference a fact scoring already confirmed real.
+Rejected: The original (pre-plan-review) "name-only" gate — checking only that the company name appears somewhere in the body. Passes a shape test but not a truth test, identical in spirit to the schema-only citation gap Slice 3 closed for fit scores.
+
+## The zero-key heuristic states evidence neutrally, never as a claim of fit
+*2026-07-31*
+Decision: `_heuristic_draft` picks the target's first stored grounded reason and states its value in a neutral sentence ("I noticed {name} works in {value}.") regardless of whether that reason described a strong or weak fit — it never says the target is an ideal partner, the right size, or a targeted market.
+Why: A stored Slice 3 reason can honestly describe a poor fit (e.g. "Industry doesn't match the brief's niche"). A heuristic that turned every stored fact into a positive claim would be dishonest exactly where the fit was worst — the demo-mode fallback must stay evidence-referencing without ever overstating what the evidence shows.
+Rejected: A single generic congratulatory template with the company name and evidence value inserted regardless of context. Simpler, but would misrepresent a target's actual fit as favorable.
+
+## New table: draft, with a partial unique index enforcing one active draft per target
+*2026-07-31*
+Decision: `CREATE UNIQUE INDEX one_active_draft_per_target ON draft (workspace_id, target_id) WHERE status != 'rejected'`. `add_draft` catches the resulting `sqlite3.IntegrityError` and re-raises it as a dedicated `ActiveDraftExists` only when the error message identifies this exact constraint; any other `IntegrityError` propagates unmapped.
+Why: The memory non-negotiable (draft once per target, reuse rather than re-draft) needs a real guarantee under a double-submit race, not just a route-level "check first" that itself races. A rejected draft is excluded from the index so re-drafting after rejection is always allowed. SQLite doesn't raise a distinctly typed exception per constraint, so message matching is the only mechanism available short of a redundant pre-check that would reintroduce the same race.
+Rejected: A plain (non-partial) unique index, which would block re-drafting after a rejection. Also rejected: mapping every `IntegrityError` on this insert to `ActiveDraftExists` — would silently hide an unrelated bug (e.g. a future foreign-key violation) behind a harmless-looking redirect.
+
+## cost_tokens exists on draft from this slice, populated in Slice 6
+*2026-07-31*
+Decision: The `draft` table's `cost_tokens` column is created now (it's part of SPEC.md §3's schema) but left `NULL` — `llm.py` does not yet record token cost.
+Why: Writing a fabricated number now, ahead of Slice 6's actual cost-aware routing and recording, would be worse than an honest `NULL`.
+Rejected: Deferring the column itself to Slice 6 and migrating later. No reason to ship the schema twice when SPEC already specifies the final shape.
+
+## Human-submitted and model-authored draft bodies share one length validator, normalized for line endings
+*2026-07-31*
+Decision: `app/models.py`'s `validate_draft_body` (20-1500 characters) is called both by `OutreachDraft`'s own field validator and by `app/db.py`'s `save_draft_body`/`approve_draft` for human edits, and normalizes `\r\n`/`\r` to `\n` before validating.
+Why: A blank or malformed human approval would defeat "a human approves every send" as surely as a blank model draft would, so one shared bound applies to both. The line-ending normalization was added after live browser verification found a real bug: an HTML `<textarea>` submits `\r\n` regardless of how its value was set, so an *unedited* approval's exact-string comparison against the stored (`\n`-only) body was failing and every unedited approval was being misrecorded as "approved with inline edits." A mocked `TestClient` test posting form data directly never exercises this, since it never goes through a real textarea.
+Rejected: A looser or absent bound for human edits. Also rejected: leaving the comparison as a raw string equality without normalization, which is what produced the bug in the first place.

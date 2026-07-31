@@ -81,3 +81,58 @@ class FitBatch(BaseModel):
     """One structured response scoring every discovered target at once."""
 
     assessments: list[FitAssessment]
+
+
+def validate_draft_body(text: str) -> str:
+    """Shared length bound for both a model-authored and a human-submitted
+    draft body. Raises ValueError on failure; callers translate that into
+    the error shape appropriate to their layer (a Pydantic ValidationError
+    here, db.InvalidDraftBody in app/db.py).
+
+    Lives here, not in app/agent/drafting.py, because OutreachDraft (below)
+    needs to call it from its own field validator in this same module — a
+    models -> drafting -> models import cycle. drafting.py never imports
+    this: every OutreachDraft it builds, LLM or heuristic, is already
+    validated by the schema below at construction time.
+
+    Normalizes CRLF/CR to LF before anything else. An HTML <textarea>
+    submits with \\r\\n line endings regardless of how the value was set
+    (HTML spec), while a stored draft body uses plain \\n — without this,
+    approve_draft's exact-match "did the human edit this" comparison would
+    call every unedited approval an edit, since the two never compared
+    equal (caught by manual browser verification, not the TestClient-based
+    tests, which post form data directly and never exercise a real
+    textarea's line-ending normalization).
+    """
+    stripped = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(stripped) < 20:
+        raise ValueError("draft body is too short to be a real message")
+    if len(stripped) > 1500:
+        raise ValueError("draft body is too long for an outreach message")
+    return stripped
+
+
+class OutreachDraft(BaseModel):
+    """A drafted outreach message, plus the one evidence pair it cites.
+
+    The evidence pair is validation metadata: app/agent/drafting.py's
+    grounding gate checks it against the target's stored, already-verified
+    Slice 3 fit reasons before trusting the body. It is not persisted as a
+    draft-table column.
+    """
+
+    body: str
+    evidence_key: str
+    evidence_value: str
+
+    @field_validator("evidence_key", "evidence_value")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("evidence_key and evidence_value are required")
+        return v
+
+    @field_validator("body")
+    @classmethod
+    def body_is_reasonable(cls, v: str) -> str:
+        return validate_draft_body(v)

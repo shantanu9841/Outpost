@@ -206,12 +206,125 @@ end in a scratch workspace with a hard server restart (a stale
 `uvicorn --reload` initially served pre-fix code, caught by checking
 persisted DB values, not just the rendered page).
 
+Slice 4 adds drafting, a human approval queue, and a pipeline board, from
+`SLICE_4_PLAN.md` v2.3. The new `draft` table (`id`, `workspace_id`,
+`target_id`, `body`, `status`, `edited_body`, `model_used`, `cost_tokens`,
+`created_at`) carries a partial unique index
+(`one_active_draft_per_target ... WHERE status != 'rejected'`), so a target
+can have at most one non-rejected draft — the authoritative guard behind the
+route's friendlier "don't offer a second draft" check. Two separate,
+explicit state machines live as module constants in `app/db.py`:
+`DRAFT_TRANSITIONS` (pending/edited to edited/approved/rejected; approved and
+rejected are terminal) and `STAGE_TRANSITIONS` (queued to contacted/declined,
+contacted to replied/declined, replied to live/declined; live and declined
+are terminal). Both are enforced in the database, not just the UI — an
+illegal jump (even to a valid enum value, e.g. queued to live) is a
+controlled `InvalidTransition` (409 at the route), a same-stage request is an
+idempotent no-op with no audit row, and `set_target_stage` requires a
+workspace-scoped **approved** draft to exist before evaluating any
+transition at all, so a target can't be advanced by a direct POST before a
+human has approved something for it — that failure is deliberately
+indistinguishable from a missing/cross-workspace target (both resolve to
+`NotFound`), so the response itself never confirms a target exists in
+another state.
+
+`app/agent/drafting.py` mirrors intake/scoring's status-carrying shape
+(`DraftStatus`: `llm_ok`/`no_gemini_key`/`invalid_gemini_key`/
+`gemini_error`/`heuristic_fallback`). The LLM path asks Gemini for a
+structured `OutreachDraft` (body plus the one evidence key/value it built the
+message on) via the existing `generate_structured` two-shot retry, then a
+runtime grounding gate (`_is_draft_grounded`) checks that pair against the
+target's own stored, already-verified Slice 3 fit reasons, confirms the body
+actually uses that value, and requires the recipient be named when a
+meaningful identity exists — a schema-valid but ungrounded draft (fabricated
+pair, another target's evidence, or a value the body never mentions) falls
+back to the heuristic rather than being trusted. The zero-key heuristic
+(`_heuristic_draft`) reads the target's first stored grounded reason and
+states its value neutrally, in the sentence structure design.md's Voice rules
+call for — it never turns a poor-fit fact into a positive claim, since a
+stored reason may describe a weak fit as honestly as a strong one. The
+drafting `SYSTEM_PROMPT` was authored applying the `beautiful-prose` and
+`humanizer` skills plus Mom-Test directness, per SPEC.md §6.
+
+`app/db.py` gained the atomic Slice 4 mutations, each writing its audit row
+in the same transaction as the state change via a shared `_insert_audit`
+helper (the existing `add_audit` now delegates to it): `add_draft` (an
+`INSERT ... SELECT` tenancy guard — a target in another workspace inserts
+zero rows and raises `NotFound`; the partial unique index's violation is
+caught and re-raised as `ActiveDraftExists`, never a bare
+`sqlite3.IntegrityError`), `save_draft_body` / `approve_draft` /
+`reject_draft` (each a single conditional `UPDATE ... WHERE status IN
+(...)` plus a `cursor.rowcount` check — SQLite's writer serialization means
+two concurrent terminal actions on the same draft cannot both match),
+`get_target`, `get_draft`, `get_active_draft_for_target`,
+`get_latest_draft_for_target`, `has_approved_draft`, `list_pending_drafts`,
+and `list_pipeline_targets` (`GROUP BY`-deduplicated, one row per approved
+target, latest approved draft wins). `set_target_stage` instead uses `BEGIN
+IMMEDIATE` before its scoped read (which also evaluates the approved-draft
+gate), holding the writer reservation through validation, the stage update,
+and a truthful `"old -> new"` audit insert — this is the one function whose
+audit detail needs the mutable prior stage, which a conditional `UPDATE`
+alone can't expose. Approving a draft commits whatever text is currently in
+the textarea (compared against the draft's own immutable `body` column in
+the same statement), so a human never loses an unsaved edit by forgetting to
+press Save first. Both model-authored and human-submitted bodies are
+validated by one shared `validate_draft_body` (in `app/models.py`, to avoid
+a `models -> drafting -> models` import cycle) — a blank or over-1500-
+character approval is rejected before any mutation, the same as a
+malformed model draft.
+
+`app/main.py` gained the routes (`POST /targets/{id}/draft`,
+`GET /approvals`, `POST /drafts/{id}/action` — one form, three buttons
+(save/approve/reject) via a `DraftAction` literal, `GET /pipeline`,
+`POST /targets/{id}/stage` via a `PipelineStage` literal), a `nav_context`
+helper shared by every route (workspace, workspaces, and the Approvals
+queue count shown as a nav pill), and campaign-detail's per-target lifecycle
+CTA (`_draft_cta`: Draft outreach / Draft again / a link into Approvals / a
+link onto Pipeline — never linking an approved or rejected draft to a queue
+that excludes it) plus a compact Activity list rendering every audit row
+(including the pre-existing intake/discovery/scoring ones) via
+`audit_banners.label_for`. New templates `approvals.html` and
+`pipeline.html`, new nav items with the count pill in `base.html`, and
+CSS additions in `app.css` (draft cards, the pipeline board and its five
+`--pl-*` stage pills, the nav count pill, activity list, `.btn--destructive`)
+— all token-only, no new colors or spacing.
+
+A retained `tests/test_slice4_drafting.py` (70 tests) covers every
+correction in the plan, including two real two-connection concurrency tests
+against an on-disk temp SQLite file: two threads racing
+`approve_draft`/`reject_draft` on the same pending draft always produce
+exactly one terminal state and exactly one audit row; two threads racing
+`set_target_stage` on the same target produce only the serial histories
+`STAGE_TRANSITIONS` actually allows, with every audit detail naming the
+stage that truly preceded it. Verified live end-to-end in a scratch
+workspace ("Slice 4 Verify", zero keys): a business campaign's heuristic
+drafts were generated, edited, and approved without pressing Save first,
+advanced Queued -> Contacted -> Replied -> Live, another target was
+declined straight from Queued, a crafted direct POST attempting Queued ->
+Live returned 409 with the target's stage and audit trail both unchanged, a
+draft was rejected and its target's campaign-detail CTA correctly read
+"Draft again," and the audit trail (checked directly against `outpost.db`)
+recorded exactly one row per action throughout, matching the campaign-detail
+Activity list exactly. Manual verification caught one real bug the
+TestClient-based tests couldn't: a browser `<textarea>` submits `\r\n` line
+endings regardless of how its value was set, so approving a draft
+*unedited* was being misread as an edit (`submitted_body != body` under
+exact string comparison) — fixed by normalizing CRLF/CR to LF inside the
+shared `validate_draft_body`, with a regression test added afterward.
+Computed-style checks confirmed all five `--pl-*` stage pills and the
+Approvals nav count pill (solid `--accent` only when non-zero) resolve
+correctly in both light and dark themes. No live-Gemini drafting
+verification was performed this session (no Gemini key was available) — the
+zero-key heuristic path is fully verified; the LLM path is covered by mocked
+tests only and remains unverified against the real API, flagged the same way
+prior slices flagged their own live-only gaps.
+
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)
 - [x] Slice 1: Workspaces and BYO-key settings
 - [x] Slice 2: B2B discovery (Apollo)   [load skill: apollo:prospect, apollo:enrich-lead]
 - [x] Slice 3: Fit-scoring with citations
-- [ ] Slice 4: Drafting, approval queue, pipeline   [load skill: beautiful-prose, humanizer]
+- [x] Slice 4: Drafting, approval queue, pipeline   [load skill: beautiful-prose, humanizer]
 - [ ] Slice 5: Creator sources and demo mode
 - [ ] Slice 6: Eval and cost-aware routing
 

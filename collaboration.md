@@ -1213,3 +1213,135 @@ or coding sessions. It complements, but does not replace:
 - Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD `39eb6c0d0d36eb7ee0fbb9238401813c1a08fc17` before this documentation-only commit. The application remains at the hardened Slice 3 state.
 - Known limitations: `BEGIN IMMEDIATE` uses the existing default SQLite connection timeout. A request that cannot acquire the writer reservation within that timeout may raise `sqlite3.OperationalError: database is locked`; special lock-timeout handling remains intentionally out of scope for this local single-file app. No model/provider or live-Gemini verification is relevant to this planning-only correction.
 - Next action: SDE 1 may implement Slice 4 from v2.3 after the required model checkpoint/reconfirmation, then execute the complete retained automated and manual verification plan before implementation sign-off.
+
+## 2026-07-31 — Slice 4 implemented: drafting, approval queue, pipeline
+
+- Contributor/environment: SDE 1 / Claude Code (Sonnet)
+- Slice: Slice 4 (drafting, approval queue, pipeline) — full implementation
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Implemented `SLICE_4_PLAN.md` v2.3 end to end, in
+  the order its own §0 "next action" specified. Confirmed the precondition
+  first (branch `codex/sde-1-slice-2-hardening`, HEAD `11b71fc`, clean tree,
+  100 tests green, Slice 4 not yet implemented) before reading every file the
+  plan builds on (`app/db.py`, `app/models.py`, `app/main.py`,
+  `app/agent/scoring.py`, `app/agent/intake.py`, `app/llm.py`,
+  `app/sources/base.py`/`seed.py`/`__init__.py`, `app/audit_banners.py`, the
+  existing templates, `app.css`, `tokens.css`) to ground every plan section
+  against real committed code rather than assumption. New:
+  `app/agent/drafting.py` (`DraftStatus`/`DraftResult`/`draft_outreach()` —
+  the LLM path via `generate_structured(OutreachDraft, ...)`, a runtime
+  `_is_draft_grounded()` gate checking the model's cited evidence pair
+  against the target's stored Slice 3 `fit_reasons_json`, and the neutral,
+  always-grounded `_heuristic_draft()` fallback), `app/templates/
+  approvals.html` and `pipeline.html`, `tests/test_slice4_drafting.py` (70
+  retained tests covering all 21 items in plan §11.1, including the two
+  real two-connection concurrency tests against an on-disk temp SQLite
+  file). Modified: `app/models.py` (`validate_draft_body` and
+  `OutreachDraft`, placed here rather than in `drafting.py` per the plan's
+  finding 13 to avoid a `models -> drafting -> models` import cycle);
+  `app/db.py` (the `draft` table plus the `one_active_draft_per_target`
+  partial unique index in `init()`; `DRAFT_TRANSITIONS`/`STAGE_TRANSITIONS`/
+  `DRAFT_STATUSES`/`STAGES`/`STAGE_SET` module constants;
+  `NotFound`/`InvalidTransition`/`InvalidDraftBody`/`ActiveDraftExists`; a
+  shared `_insert_audit` helper with `add_audit` refactored to delegate to
+  it; `get_target`, `add_draft`, `get_draft`, `get_active_draft_for_target`,
+  `get_latest_draft_for_target`, `has_approved_draft`,
+  `list_pending_drafts`, `save_draft_body`, `approve_draft`, `reject_draft`,
+  `list_pipeline_targets`, `set_target_stage` — the three draft mutations
+  use a conditional `UPDATE ... WHERE status IN (...)` plus `cursor.rowcount`
+  per plan §5.1, and `set_target_stage` uses `BEGIN IMMEDIATE` before its
+  scoped read per the plan's v2.3 correction); `app/main.py` (`nav_context`,
+  the five new routes, `_draft_cta`, the campaign-detail Activity list, and
+  every existing route's context dict switched to spread `nav_context`);
+  `app/audit_banners.py` (the five Slice 4 action constants plus
+  `ACTION_LABELS`/`label_for`); `app/templates/base.html` (Approvals +
+  Pipeline nav items with the count pill) and `campaign_detail.html` (Draft
+  column + Activity list); `app/static/css/app.css` (draft cards, the
+  pipeline board and its five `--pl-*` stage pills, the nav count pill,
+  activity list, `.btn--destructive` — token-only, no new colors or
+  spacing). No changes to `tokens.css`, `seeds/`, or the `target`/`audit`
+  table schemas (the plan's own §2 confirmed none were needed). One real
+  bug was found and fixed during manual browser verification, not by any
+  automated test: an HTML `<textarea>` submits `\r\n` line endings
+  regardless of how its value was set, so an *unedited* approval's exact
+  comparison against the stored (`\n`-only) body was always unequal, and
+  every unedited approval was being misrecorded as "approved with inline
+  edits." Fixed by normalizing CRLF/CR to LF inside the shared
+  `validate_draft_body` (the one function both the schema and the human-body
+  path already funnel through), with a regression test
+  (`test_crlf_textarea_submission_without_edit_is_not_flagged_as_edited`)
+  added to `tests/test_slice4_drafting.py` afterward. This is logged as its
+  own DECISIONS.md entry rather than silently folded into the pre-existing
+  "human body validator" entry, since it changed behavior after the initial
+  implementation and tests were already green.
+- Files or areas affected: All files listed above, plus this entry,
+  `PROGRESS.md`, and `DECISIONS.md`.
+- Verification: `python -m unittest discover -s tests` — 170 tests passed
+  (70 new in `test_slice4_drafting.py`; 100 prior, all still green,
+  confirming Slice 1-3 behavior is unchanged). Live, in a scratch workspace
+  ("Slice 4 Verify", created directly via `db.create_workspace()` the same
+  way prior sessions worked around this environment's workspace-creation-
+  form browser-automation quirk, zero keys touched): a business campaign's
+  7 seed targets were heuristic-scored as in Slice 3; drafted outreach for
+  one target, edited the textarea, and clicked Approve **without** pressing
+  Save — confirmed via direct `outpost.db` query that `edited_body` held the
+  submitted (unsaved) text and the draft was `approved` in one step,
+  matching correction 2; advanced that target Queued -> Contacted -> Replied
+  -> Live through the Pipeline UI, confirming Live rendered with no further
+  stage buttons (terminal); on a second, separately approved target, a
+  crafted direct `fetch()` POST attempting the illegal `queued -> live` jump
+  returned **409**, and a direct DB query confirmed both the target's stage
+  and its audit trail were unchanged (no `target.stage_changed` row) —
+  proving the transition map is enforced at the database boundary, not just
+  hidden by the UI. Declined that same target legitimately from Queued via
+  the UI. Drafted and then **rejected** a fourth target; confirmed its
+  campaign-detail CTA correctly read "Draft again" (not "Draft outreach"),
+  matching the rejected-vs-never-drafted distinction. Confirmed the full
+  audit trail via direct `outpost.db` query matched the campaign-detail
+  Activity list exactly, one row per action, no duplicates, no gaps.
+  Confirmed via `fetch()` that a garbage `action` value on
+  `/drafts/{id}/action` isn't needed as a separate check — already covered
+  by the retained route-level 422 test. Computed-style checks (via
+  `getComputedStyle`) confirmed all five `.pl-pill--*` classes resolve
+  their `color`/`background-color` to the exact `--pl-*`/`--pl-*-subtle`
+  token values in both light and dark theme (toggled live via the existing
+  theme button), and confirmed the Approvals nav count pill resolves to
+  solid `--accent`/`--accent-fg` only when the queue is non-empty, reverting
+  to the neutral `--bg-subtle`/`--text-3` pill when empty. Screenshots were
+  not available in this session's browser tooling (the pane could not
+  composite frames, the same limitation noted in the Slice 3 collaboration
+  entry) — computed-style and `get_page_text` verification fully
+  substituted, per collaboration.md's own preference for text-based
+  verification. `preview_logs` showed zero server errors across the entire
+  manual verification session. `git diff --check` was clean (only the
+  expected Windows LF->CRLF notices); a credential-string scan
+  (`git diff | grep -iE "AIza|api[_-]?key"`) came back empty. No live-Gemini
+  verification was performed — no Gemini key was available this session;
+  this is recorded as an explicit, unverified gap below rather than implied
+  to have passed. No `outpost.db` rows were deleted or reset; verification
+  added one new scratch workspace and one campaign, left in place as normal
+  product data, consistent with every prior slice's verification.
+- Known limitations: The LLM drafting path (`DraftStatus.LLM_OK`, the
+  `_is_draft_grounded` gate against a real model's output, and the drafting
+  prompt's actual voice quality) is covered only by mocked tests this
+  session — SLICE_4_PLAN.md §11.2's live-Gemini step could not be run
+  because no Gemini key was available. This mirrors the same category of
+  gap prior slices have flagged for their own live-only paths, and should
+  be closed with a real key before treating the LLM drafting path as
+  demo-proven. `add_draft`'s `ActiveDraftExists` detection still relies on
+  matching SQLite's `IntegrityError` message text (inherited, unchanged,
+  same limitation already documented in the plan). The CRLF normalization
+  fix is scoped to `validate_draft_body`; any future code path that
+  compares a stored body against raw form input without going through that
+  function would reintroduce the same class of bug.
+- Next action: Owner reviews and merges/pushes this branch as desired.
+  Before relying on the LLM drafting path in a demo, run one live campaign
+  against a freshly rotated Gemini key pasted through Settings (never read
+  by the session performing it, located only by `length(key_value)` and
+  `created_at`, per the Slice 2/3 hardening convention) and confirm
+  `model_used == GEMINI_MODEL`, a human-reading draft, and the grounding
+  gate passing on real model output. Once that's done (or the owner accepts
+  the gap for now), Slice 5 (creator sources and demo mode) is next — model
+  recommendation and plan review are still owed before that implementation
+  begins, per CLAUDE.md.

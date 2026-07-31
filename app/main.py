@@ -10,6 +10,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -17,8 +18,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import audit_banners, db, sources
-from app.agent import intake, scoring
-from app.models import TargetType
+from app.agent import drafting, intake, scoring
+from app.models import Brief, TargetType
+
+# Literal mirrors of app.db's STAGES/DRAFT_STATUSES tuples, so FastAPI
+# returns a controlled 422 on a malformed enum value before it ever reaches
+# the transition-map guard in app.db.
+DraftAction = Literal["save", "approve", "reject"]
+PipelineStage = Literal["queued", "contacted", "replied", "live", "declined"]
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_COOKIE = "workspace_id"
@@ -62,6 +69,17 @@ def get_current_workspace(
     return workspaces[0]
 
 
+def nav_context(workspace) -> dict:
+    """Shared per-request template context: the current workspace, every
+    workspace (for the switcher), and the Approvals queue count shown as a
+    nav pill on every page."""
+    return {
+        "workspace": workspace,
+        "workspaces": db.list_workspaces(),
+        "approvals_count": len(db.list_pending_drafts(workspace["id"])) if workspace is not None else 0,
+    }
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Liveness check."""
@@ -75,11 +93,7 @@ def index(
 ) -> HTMLResponse:
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {"workspace": workspace, "workspaces": db.list_workspaces()},
-    )
+    return templates.TemplateResponse(request, "index.html", nav_context(workspace))
 
 
 @app.get("/workspaces/new", response_class=HTMLResponse)
@@ -87,11 +101,7 @@ def new_workspace_form(
     request: Request,
     workspace=Depends(get_current_workspace),
 ) -> HTMLResponse:
-    return templates.TemplateResponse(
-        request,
-        "workspaces_new.html",
-        {"workspace": workspace, "workspaces": db.list_workspaces()},
-    )
+    return templates.TemplateResponse(request, "workspaces_new.html", nav_context(workspace))
 
 
 @app.post("/workspaces")
@@ -122,12 +132,7 @@ def settings_page(
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {
-            "workspace": workspace,
-            "workspaces": db.list_workspaces(),
-            "setting_keys": db.SETTING_KEYS,
-            "masked": masked,
-        },
+        {**nav_context(workspace), "setting_keys": db.SETTING_KEYS, "masked": masked},
     )
 
 
@@ -183,13 +188,7 @@ def campaigns_list(
 
     campaigns = db.list_campaigns(workspace["id"])
     return templates.TemplateResponse(
-        request,
-        "campaigns_list.html",
-        {
-            "workspace": workspace,
-            "workspaces": db.list_workspaces(),
-            "campaigns": campaigns,
-        },
+        request, "campaigns_list.html", {**nav_context(workspace), "campaigns": campaigns}
     )
 
 
@@ -201,11 +200,7 @@ def new_campaign_form(
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
 
-    return templates.TemplateResponse(
-        request,
-        "campaign_new.html",
-        {"workspace": workspace, "workspaces": db.list_workspaces()},
-    )
+    return templates.TemplateResponse(request, "campaign_new.html", nav_context(workspace))
 
 
 @app.post("/campaigns")
@@ -330,18 +325,21 @@ def campaign_detail(
     for t in db.list_targets(workspace_id, campaign_id):
         raw = json.loads(t["raw_json"]) if t["raw_json"] else {}
         fit_reasons = json.loads(t["fit_reasons_json"]) if t["fit_reasons_json"] else []
+        latest_draft = db.get_latest_draft_for_target(workspace_id, t["id"])
         targets.append(
             {
                 **dict(t),
                 "country": raw.get("country"),
                 "fit_reasons": fit_reasons,
                 "fit_class": _fit_class(t["fit_score"]),
+                "cta": _draft_cta(t["id"], latest_draft),
             }
         )
 
     # Banners are re-derived from the audit trail, not passed through the
     # URL — the most recent intake.*/discovery.*/scoring.* rows for this campaign.
     banners = []
+    activity = []
     for row in db.list_audit(workspace_id, campaign_id):
         if (
             row["action"].startswith("intake.")
@@ -351,16 +349,183 @@ def campaign_detail(
             banner = audit_banners.banner_for(row["action"], row["detail"])
             if banner is not None:
                 banners.append(banner)
+        activity.append(
+            {
+                "label": audit_banners.label_for(row["action"]),
+                "detail": row["detail"],
+                "created_at": row["created_at"],
+            }
+        )
+    activity.reverse()  # newest first, for a readable Activity feed
 
     return templates.TemplateResponse(
         request,
         "campaign_detail.html",
         {
-            "workspace": workspace,
-            "workspaces": db.list_workspaces(),
+            **nav_context(workspace),
             "campaign": campaign,
             "brief": brief,
             "targets": targets,
             "banners": banners,
+            "activity": activity,
         },
     )
+
+
+def _draft_cta(target_id: int, latest_draft) -> dict:
+    """Maps a target's latest-draft state to a lifecycle call-to-action
+    (SLICE_4_PLAN.md §6.2): Draft outreach / Draft again / a link to the
+    active draft in Approvals / a link to the target on Pipeline. Never
+    links an approved or rejected draft to a queue page that excludes it.
+    """
+    if latest_draft is None:
+        return {"kind": "draft", "label": "Draft outreach"}
+    if latest_draft["status"] == "rejected":
+        return {"kind": "draft", "label": "Draft again"}
+    if latest_draft["status"] == "approved":
+        return {"kind": "pipeline", "label": "View on Pipeline", "href": f"/pipeline#target-{target_id}"}
+    return {
+        "kind": "approvals",
+        "label": "View in Approvals",
+        "href": f"/approvals#draft-{latest_draft['id']}",
+    }
+
+
+# --- Drafting, approvals, pipeline (Slice 4) --------------------------------
+
+
+@app.post("/targets/{target_id}/draft")
+def create_draft(
+    target_id: int,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+    workspace_id = workspace["id"]
+
+    target = db.get_target(workspace_id, target_id)
+    if target is None:
+        return RedirectResponse("/campaigns", status_code=303)
+
+    # Memory / UX check: don't offer a second draft while one is active.
+    # The partial unique index (one_active_draft_per_target) is the
+    # authoritative guard behind this — add_draft below still enforces it
+    # even if two requests race past this check at the same time.
+    if db.get_active_draft_for_target(workspace_id, target_id) is not None:
+        return RedirectResponse("/approvals", status_code=303)
+
+    campaign = db.get_campaign(workspace_id, target["campaign_id"])
+    if campaign is None:
+        return RedirectResponse("/campaigns", status_code=303)
+    brief = Brief.model_validate_json(campaign["brief_json"])
+
+    settings = db.get_settings(workspace_id)
+    result = drafting.draft_outreach(brief, dict(target), settings)
+
+    try:
+        db.add_draft(
+            workspace_id, target_id, result.body, result.model_used, result.status, result.reason
+        )
+    except db.ActiveDraftExists:
+        # Lost the race against a concurrent draft request; the winner's
+        # draft is already in the queue.
+        return RedirectResponse("/approvals", status_code=303)
+    except db.NotFound:
+        return RedirectResponse("/campaigns", status_code=303)
+
+    return RedirectResponse("/approvals", status_code=303)
+
+
+@app.get("/approvals")
+def approvals_list(
+    request: Request,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+
+    drafts = [
+        {**dict(d), "fit_class": _fit_class(d["target_fit_score"])}
+        for d in db.list_pending_drafts(workspace["id"])
+    ]
+    return templates.TemplateResponse(
+        request, "approvals.html", {**nav_context(workspace), "drafts": drafts}
+    )
+
+
+@app.post("/drafts/{draft_id}/action")
+def draft_action(
+    draft_id: int,
+    action: DraftAction = Form(...),
+    body: str = Form(...),
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+    workspace_id = workspace["id"]
+
+    try:
+        if action == "save":
+            db.save_draft_body(workspace_id, draft_id, body)
+        elif action == "approve":
+            db.approve_draft(workspace_id, draft_id, body)
+        else:
+            db.reject_draft(workspace_id, draft_id)
+    except db.InvalidDraftBody as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except db.InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except db.NotFound:
+        return RedirectResponse("/approvals", status_code=303)
+
+    return RedirectResponse("/approvals", status_code=303)
+
+
+@app.get("/pipeline")
+def pipeline_board(
+    request: Request,
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+    workspace_id = workspace["id"]
+
+    columns: dict[str, list[dict]] = {stage: [] for stage in db.STAGES}
+    for t in db.list_pipeline_targets(workspace_id):
+        stage = t["stage"]
+        columns[stage].append(
+            {
+                **dict(t),
+                "fit_class": _fit_class(t["target_fit_score"]),
+                # Ordered per STAGES so a "forward" move always renders
+                # before "Decline" — never derived from dict/set iteration
+                # order, which Python does not guarantee to match STAGES.
+                "next_stages": sorted(db.STAGE_TRANSITIONS[stage], key=db.STAGES.index),
+            }
+        )
+
+    return templates.TemplateResponse(
+        request, "pipeline.html", {**nav_context(workspace), "columns": columns}
+    )
+
+
+@app.post("/targets/{target_id}/stage")
+def update_target_stage(
+    target_id: int,
+    stage: PipelineStage = Form(...),
+    workspace=Depends(get_current_workspace),
+):
+    if workspace is None:
+        return RedirectResponse("/workspaces/new", status_code=303)
+    workspace_id = workspace["id"]
+
+    try:
+        db.set_target_stage(workspace_id, target_id, stage)
+    except db.NotFound:
+        # Covers both "no such target in this workspace" and "target has no
+        # approved draft yet" — the two are deliberately indistinguishable.
+        return RedirectResponse("/pipeline", status_code=303)
+    except db.InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    return RedirectResponse("/pipeline", status_code=303)

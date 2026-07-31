@@ -35,6 +35,7 @@
           <th class="table__num">Size</th>
           <th class="table__num">Fit</th>
           <th>Source</th>
+          <th>Draft</th>
         </tr>
       </thead>
       <tbody>
@@ -62,10 +63,19 @@
             {% endif %}
           </td>
           <td><span class="badge badge--muted">{{ t.source }}</span></td>
+          <td>
+            {% if t.cta.kind == "draft" %}
+            <form method="post" action="/targets/{{ t.id }}/draft" class="target-cta-form">
+              <button class="btn btn--secondary btn--small" type="submit">{{ t.cta.label }}</button>
+            </form>
+            {% else %}
+            <a class="target-cta-link" href="{{ t.cta.href }}">{{ t.cta.label }}</a>
+            {% endif %}
+          </td>
         </tr>
         {% if t.fit_reasons %}
         <tr id="reasons-{{ t.id }}" class="reasons-row" hidden>
-          <td colspan="6">
+          <td colspan="7">
             <ul class="reasons-list">
               {% for r in t.fit_reasons %}
               <li class="reason">
@@ -87,6 +97,19 @@
     <h1 class="empty__title">No candidates matched</h1>
     <p class="empty__body">Try a broader description of what you're promoting.</p>
   </section>
+  {% endif %}
+
+  {% if activity %}
+  <h2 class="activity__title">Activity</h2>
+  <ul class="activity">
+    {% for a in activity %}
+    <li class="activity__item">
+      <span class="activity__label">{{ a.label }}</span>
+      {% if a.detail %}<span class="activity__detail">{{ a.detail }}</span>{% endif %}
+      <span class="activity__time mono">{{ a.created_at }}</span>
+    </li>
+    {% endfor %}
+  </ul>
   {% endif %}
 </section>
 {% endblock %}
