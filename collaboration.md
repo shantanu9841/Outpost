@@ -1345,3 +1345,39 @@ or coding sessions. It complements, but does not replace:
   the gap for now), Slice 5 (creator sources and demo mode) is next — model
   recommendation and plan review are still owed before that implementation
   begins, per CLAUDE.md.
+
+## 2026-07-31 — Slice 4 approval reversion bug fixed after SDE 2 review
+
+- Contributor/environment: SDE 2 / Codex desktop.
+- Slice: Slice 4 post-implementation correction.
+- Role: Reviewer / implementer, with the owner's explicit request to fix the
+  verified defect.
+- Implementation status: Complete.
+- Changes and corrections: Fixed `approve_draft` losing the human's current
+  textarea text when a prior Save had populated `edited_body` and the human
+  later reverted the textarea to the immutable original `body` before
+  approving. The atomic conditional UPDATE now sets `edited_body = NULL`
+  when the normalized submitted body equals the original; otherwise it stores
+  the submitted body. Consequently `COALESCE(edited_body, body)` always
+  resolves to exactly what the human approved, and the approval audit's inline-
+  edit detail remains consistent with the final effective text. Added the
+  retained save -> revert -> approve regression covering the draft row,
+  Pipeline text, and audit detail. Corrected the same stale `CASE` expression
+  and explanation in `SLICE_4_PLAN.md`.
+- Files or areas affected: `app/db.py`,
+  `tests/test_slice4_drafting.py`, `SLICE_4_PLAN.md`, `PROGRESS.md`,
+  and this `collaboration.md` entry. No schema, templates, CSS,
+  `DECISIONS.md`, credentials, or local `outpost.db` data changed.
+- Verification: Focused regression
+  (`python -m unittest discover -s tests -p test_slice4_drafting.py -k reverting`)
+  passed (`Ran 1 test`, `OK`). Full suite
+  (`python -m unittest discover -s tests`) passed (`Ran 171 tests`, `OK`),
+  increasing Slice 4's retained tests from 70 to 71 while preserving all 100
+  pre-Slice-4 tests. `git diff --check` was clean before staging.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `0beba4d` before this correction; working tree contained only the five
+  files listed above.
+- Known limitations: The pre-existing live-Gemini verification gap is unchanged;
+  no provider call or credential was needed for this deterministic DB fix.
+- Next action: Owner may re-review this narrow correction. Slice 4 is ready for
+  sign-off if the committed diff and 171-test result are accepted.

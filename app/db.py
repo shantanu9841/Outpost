@@ -724,9 +724,12 @@ def approve_draft(workspace_id: int, draft_id: int, submitted_body: str, actor: 
     """Approve a draft, committing whatever text is currently in the
     textarea — a human never loses an unsaved edit by forgetting to press
     Save first. The CASE compares submitted_body against the draft's own
-    immutable body column (never a prior read of mutable edited_body), so
-    "was this edited at approval" is computed race-free in the same
-    conditional UPDATE that performs the approval.
+    immutable body column (never a prior read of mutable edited_body). When
+    the submitted text equals the original body it clears any prior saved
+    edit; otherwise it stores the submitted text. This makes the approved
+    effective body exactly what the human submitted while computing "was
+    this edited at approval" race-free in the same conditional UPDATE that
+    performs the approval.
     """
     try:
         cleaned = validate_draft_body(submitted_body)
@@ -739,7 +742,7 @@ def approve_draft(workspace_id: int, draft_id: int, submitted_body: str, actor: 
             """
             UPDATE draft
             SET status = 'approved',
-                edited_body = CASE WHEN ? = body THEN edited_body ELSE ? END
+                edited_body = CASE WHEN ? = body THEN NULL ELSE ? END
             WHERE workspace_id = ? AND id = ? AND status IN ('pending', 'edited')
             """,
             (cleaned, cleaned, workspace_id, draft_id),

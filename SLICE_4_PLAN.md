@@ -604,7 +604,7 @@ cur = conn.execute(
     """
     UPDATE draft
     SET status = 'approved',
-        edited_body = CASE WHEN ? = body THEN edited_body ELSE ? END
+        edited_body = CASE WHEN ? = body THEN NULL ELSE ? END
     WHERE workspace_id = ? AND id = ? AND status IN ('pending', 'edited')
     """,
     (submitted_body, submitted_body, workspace_id, draft_id),
@@ -622,8 +622,11 @@ else:
 
 The `edited_body` `CASE` compares `submitted_body` against the draft's own
 **immutable** `body` column rather than against a prior read of mutable
-`edited_body`. This folds "did the human change the original draft" into the
-same atomic statement and preserves the signal after a prior Save.
+`edited_body`. It stores the submitted text when it differs from the original
+and clears `edited_body` when it matches, so reverting a previously saved edit
+to the original text is honored. This folds "did the human change the original
+draft" into the same atomic statement while guaranteeing the effective
+approved body is exactly what the human submitted.
 
 `save_draft_body` and `reject_draft` follow the identical shape with a fixed
 target `status` and no `CASE`. On `rowcount == 0`, a diagnostic follow-up

@@ -289,7 +289,7 @@ CSS additions in `app.css` (draft cards, the pipeline board and its five
 `--pl-*` stage pills, the nav count pill, activity list, `.btn--destructive`)
 — all token-only, no new colors or spacing.
 
-A retained `tests/test_slice4_drafting.py` (70 tests) covers every
+A retained `tests/test_slice4_drafting.py` (71 tests) covers every
 correction in the plan, including two real two-connection concurrency tests
 against an on-disk temp SQLite file: two threads racing
 `approve_draft`/`reject_draft` on the same pending draft always produce
@@ -311,6 +311,13 @@ endings regardless of how its value was set, so approving a draft
 *unedited* was being misread as an edit (`submitted_body != body` under
 exact string comparison) — fixed by normalizing CRLF/CR to LF inside the
 shared `validate_draft_body`, with a regression test added afterward.
+A post-implementation SDE 2 review found a second approval edge case: after
+Save populated `edited_body`, reverting the textarea to the original `body`
+and approving preserved the stale saved edit instead of the submitted text.
+`approve_draft` now clears `edited_body` when the normalized submission equals
+the immutable original, so `COALESCE(edited_body, body)` always resolves to
+the text the human actually approved; a save -> revert -> approve regression
+test covers the stored row, Pipeline text, and approval audit detail.
 Computed-style checks confirmed all five `--pl-*` stage pills and the
 Approvals nav count pill (solid `--accent` only when non-zero) resolve
 correctly in both light and dark themes. No live-Gemini drafting

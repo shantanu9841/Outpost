@@ -304,6 +304,27 @@ class ApproveUnsavedTextTests(_DBFixture, unittest.TestCase):
         approved_row = next(r for r in db.list_audit(ws, camp) if r["action"] == "draft.approved")
         self.assertIsNone(approved_row["detail"])
 
+    def test_reverting_saved_edit_to_original_before_approve_clears_stale_edit(self):
+        """Approve must commit the textarea's current text even when a prior
+        Save populated edited_body and the human later reverts to body."""
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        original = "Hi there, this is the original outreach draft body."
+        saved_edit = "Hi there, this is a previously saved edited outreach body."
+        draft_id = self._make_draft(ws, target_id, body=original)
+
+        db.save_draft_body(ws, draft_id, saved_edit)
+        db.approve_draft(ws, draft_id, original)
+
+        draft = db.get_draft(ws, draft_id)
+        self.assertEqual(draft["status"], "approved")
+        self.assertIsNone(draft["edited_body"])
+        self.assertEqual(db.list_pipeline_targets(ws)[0]["draft_text"], original)
+        approved_row = next(
+            r for r in db.list_audit(ws, camp) if r["action"] == "draft.approved"
+        )
+        self.assertIsNone(approved_row["detail"])
+
     def test_route_level_approve_without_save_shows_changed_text_on_pipeline(self):
         from fastapi.testclient import TestClient
 
