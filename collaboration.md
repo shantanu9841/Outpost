@@ -877,3 +877,115 @@ or coding sessions. It complements, but does not replace:
   recommendation and plan review are still owed before that implementation
   begins, per CLAUDE.md. `SLICE_4_PLAN.md` (already committed) is untouched
   by this correction pass.
+
+## 2026-07-31 — Slice 4 plan corrected to v2 (planning only, no implementation)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 4 (drafting, approval queue, pipeline) — planning correction only
+- Role: Planner / Reviewer
+- Implementation status: Not started
+- Changes and corrections: Rewrote `SLICE_4_PLAN.md` end to end to v2,
+  incorporating all seven owner-approved SDE 2 corrections consistently across
+  architecture, routes, DB functions, UI, tests, verification, decisions, and
+  the files-changed list. Confirmed the precondition first: Slice 3 hardening is
+  committed and the tree clean (`fc5bc62` on `codex/sde-1-slice-2-hardening`,
+  100 tests green), and grounded every correction against the actually-committed
+  code (`app/db.py`, `app/main.py`, `app/agent/scoring.py`, `app/models.py`,
+  `app/llm.py`, `app/sources/seed.py`/`apollo.py`/`base.py`,
+  `app/audit_banners.py`, and the `campaign_detail.html`/`base.html` templates)
+  rather than assumption. The seven corrections: (1) the two state machines are
+  now enforced, not just enum-validated — explicit `DRAFT_TRANSITIONS` and
+  `STAGE_TRANSITIONS` maps (module constants in `db.py`) shared by the DB guard,
+  routes, and tests, with a documented controlled-response contract
+  (cross-workspace/missing → not-found redirect; malformed enum → 422; illegal
+  in-state transition → 409; double-submit race → `/approvals` redirect), and a
+  same-stage request defined as an idempotent no-op that writes no misleading
+  audit row. (2) Approve now commits the current textarea body — the approval
+  submit carries `body`, and `approve_draft` captures it as `edited_body` if it
+  differs, in the same atomic operation that approves; a retained route test
+  types a change and approves without Save, then proves the Pipeline shows the
+  changed text; the approval card is one form with three real submit buttons
+  (save/approve/reject) posting to a single `/drafts/{id}/action` dispatcher.
+  (3) LLM drafts are grounded in stored Slice 3 evidence — `OutreachDraft` gains
+  `evidence_key`/`evidence_value`, and a runtime gate (`_is_draft_grounded`)
+  verifies the pair matches one of the target's stored grounded fit reasons
+  (transitively inheriting Slice 3's `_is_grounded` guarantee), the value is
+  non-blank, the body references the value via a documented normalized-substring
+  comparison, and the recipient identity is named when one meaningfully exists
+  (target name, or handle/domain when the name is `base.DEFAULT_NAME`); the plan
+  explicitly states `generate_structured`'s retry covers only JSON/schema
+  validation, so semantic grounding is a separate layer that falls back
+  deterministically to the heuristic (`HEURISTIC_FALLBACK`); the citation fields
+  are validation-only metadata and add no `draft`-table column. (4) The
+  heuristic is neutral and truthful — it states one stored evidence value with
+  non-committal wording ("I noticed {name} works in {value}.") and never claims
+  the fact proves fit, offers `brief.product` and one concrete ask, and a
+  retained test with a deliberately poor-fit stored reason proves it never
+  describes the target as an ideal partner or targeted market. (5)
+  Campaign-detail links follow the lifecycle — Draft outreach / Draft again /
+  Approvals-link / Pipeline-link — with a `_draft_cta` mapping table, rejected
+  drafts visible only through Activity history, and no approved/rejected draft
+  ever linked to a queue that excludes it. (6) Uniqueness and tenancy are
+  enforced in the database — a partial unique index
+  (`one_active_draft_per_target ... WHERE status != 'rejected'`) allows at most
+  one non-rejected draft per `(workspace_id, target_id)`, `add_draft` uses an
+  `INSERT ... SELECT` tenancy guard (zero rows → `NotFound`), every join
+  qualifies both `workspace_id`s, and `list_pipeline_targets` de-duplicates via
+  `GROUP BY target.id` with a deterministic approved-draft pick. (7) Each
+  mutation and its audit row commit in one transaction via a shared internal
+  `_insert_audit(conn, ...)` helper (the standalone `db.add_audit` is refactored
+  to delegate to it and is retained only for the Slice 2/3 intake/discovery/
+  scoring rows); on failure neither the state change nor the audit row remains,
+  each audit row carries the correct workspace/campaign/target/draft ids, and
+  the verification plan adds a test that a simulated failure leaves neither
+  partial state nor a false audit. The §11 retained-test list was expanded to 15
+  items covering all corrections plus a "nothing sends" test (patch `httpx.post`,
+  assert the approve/stage/reject paths make zero outbound calls), and the
+  manual/live steps were updated to verify the approved edited text appears on
+  Pipeline and the audit trail matches each action exactly once. Assessed
+  collaboration.md rule 7 (stop if a correction materially expands Slice 4
+  beyond SPEC.md): none do — each tightens toward the non-negotiables (#4 audit,
+  #5 structured output, #6 isolation) and SPEC §4/§6's "references the cited
+  evidence"; the grounding change (correction 3) makes the slice more faithful
+  to SPEC, not broader — so no scope-stop was needed. A full top-to-bottom read
+  of the finished v2 confirmed all old contradictory wording was removed (the v1
+  name-only personalization gate, and the v1 §12 decision 4 that called grounding
+  "not" the approach), that all 20+ `§` cross-references resolve to real
+  sections, and that the DB signatures, routes, UI behavior, audit table, test
+  list, decisions, and files-changed list agree; one stray `§4.4-gate removed`
+  reference misfiled under correction 2 was moved out.
+- Files or areas affected: `SLICE_4_PLAN.md` (rewritten to v2) and this
+  `collaboration.md` entry. No application code, tests, templates, CSS, schemas,
+  `outpost.db`, or seed data were touched — planning only. `PROGRESS.md` and
+  `DECISIONS.md` were intentionally not updated (no implementation yet).
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of reading every committed file the corrections
+  reference (listed above) to ground each correction in real code, a full
+  internal-consistency read of the finished v2 (the pass that found and fixed the
+  misfiled cross-reference and confirmed the removed v1 gate/decision wording),
+  a `grep` confirming every `§` reference maps to an existing header and no stale
+  "name-only"/"personalization gate" wording remains except where the plan
+  explicitly documents removing it, and `git diff --check` (clean; only the
+  expected Windows LF→CRLF notice, no whitespace errors).
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `fc5bc62` before this commit. `SLICE_4_PLAN.md` is the only file whose content
+  changed (plus this log entry); the application remains at the Slice 3
+  (hardened) state — Slice 4 has not been implemented.
+- Known limitations: The §4.4 body-grounding gate uses a normalized-substring
+  comparison, which is deliberately lighter than Slice 3's exact citation match
+  because prose is paraphrasable — a short numeric evidence value could
+  substring-match incidentally (documented in §12 decision 4). The live-Gemini
+  drafting-quality and live-grounding step (§11.2) can only be judged against a
+  real key at implementation time; a mock cannot prove the prompt yields a human,
+  grounded draft. Several interpretive decisions remain owner-vetoable in §12,
+  notably: a single `draft.approved` audit row for approve-with-inline-edits
+  (rather than a separate `draft.edited` + `draft.approved`), and the one-form/
+  three-action approval endpoint shape.
+- Next action: Owner confirms v2 has no further outstanding changes (this commit
+  represents the corrected plan; §12 lists the interpretive decisions still open
+  to veto). Per collaboration.md rule 6, implementation may then begin on Sonnet
+  after the owner confirms the model switch (CLAUDE.md) — starting with
+  `app/models.py` (`OutreachDraft`), then `app/agent/drafting.py`, then the
+  `draft` table + partial unique index + atomic DB functions, then the routes/
+  nav/UI, then the §11.1 retained tests, then the §11.2 no-key and live-Gemini
+  verification.
