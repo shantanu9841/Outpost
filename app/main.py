@@ -272,7 +272,12 @@ def create_campaign(
         known_invalid_key_reason=known_invalid_reason,
     )
 
-    # 9. Persist targets and their fit scores together, in one transaction —
+    # 9. Defense-in-depth: confirm every score has a grounded citation
+    # before it ever reaches the database — a second, independent check
+    # beyond score_batch's own internal guarantee (Slice 3 hardening).
+    scoring.assert_grounded(evidence_list, score_outcome.scores)
+
+    # 10. Persist targets and their fit scores together, in one transaction —
     # a campaign is never left partially scored.
     db.add_scored_targets(
         workspace_id,
@@ -282,11 +287,11 @@ def create_campaign(
         score_outcome.scores,
     )
 
-    # 10. Write ONE scoring audit row from the honest aggregate outcome.
+    # 11. Write ONE scoring audit row from the honest aggregate outcome.
     scoring_action, _, _ = audit_banners.SCORING_MAP[score_outcome.status]
     db.add_audit(workspace_id, campaign_id, "agent", scoring_action, detail=score_outcome.reason)
 
-    # 11. Redirect to the campaign-detail route.
+    # 12. Redirect to the campaign-detail route.
     return RedirectResponse(f"/campaigns/{campaign_id}", status_code=303)
 
 

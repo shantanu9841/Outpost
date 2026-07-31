@@ -17,7 +17,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.models import Brief, Candidate
-from app.sources.base import Source, SourceResult, SourceStatus, coerce_int
+from app.sources.base import Source, SourceResult, SourceStatus, canonical_name, coerce_int
 
 SEARCH_URL = "https://api.apollo.io/api/v1/mixed_companies/search"
 
@@ -46,14 +46,15 @@ def normalize_evidence(raw: dict) -> dict:
 
     Fit-scoring (app/agent/scoring.py) reads only this shape, never Apollo's
     own field names — so evidence reads identically regardless of which
-    source produced the target. "name" defaults the same way _to_candidate's
-    Candidate.name does (a malformed/empty Apollo organization object has no
-    "name" key at all) — the two must never diverge, or the heuristic's
-    evidence-of-last-resort citation (see scoring._heuristic) would cite a
+    source produced the target. "name" goes through canonical_name(), the
+    exact same call _to_candidate makes on the exact same raw value — the
+    two must never diverge (a missing, null, empty, or whitespace-only name
+    all become the same canonical fallback), or the heuristic's
+    evidence-of-last-resort citation (see scoring._heuristic) could cite a
     name value that doesn't match what's actually in the evidence dict.
     """
     return {
-        "name": raw.get("name") or "Unknown company",
+        "name": canonical_name(raw.get("name")),
         "industry": raw.get("industry"),
         "employees": coerce_int(raw.get("estimated_num_employees")),
         "country": raw.get("country"),
@@ -138,7 +139,7 @@ class ApolloSource(Source):
         return Candidate(
             source="apollo",
             external_id=str(org.get("id")) if org.get("id") else None,
-            name=org.get("name", "Unknown company"),
+            name=canonical_name(org.get("name")),
             handle_or_domain=org.get("primary_domain") or org.get("website_url"),
             reach=org.get("estimated_num_employees"),
             location=location,

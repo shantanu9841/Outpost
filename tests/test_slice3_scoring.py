@@ -20,11 +20,20 @@ from pydantic import ValidationError
 
 from app import db, llm
 from app.agent import scoring
-from app.agent.intake import IntakeStatus
-from app.agent.scoring import ScoreStatus, TargetScore, _heuristic, _is_grounded, _stem
+from app.agent.intake import IntakeStatus, _heuristic_brief
+from app.agent.scoring import (
+    ScoreStatus,
+    TargetScore,
+    UngroundedEvidenceError,
+    _heuristic,
+    _is_grounded,
+    _stem,
+)
 from app.models import Brief, Candidate, FitAssessment, FitBatch, FitReason
+from app.sources.apollo import ApolloSource
 from app.sources.apollo import normalize_evidence as apollo_normalize_evidence
-from app.sources.base import SourceResult, SourceStatus, coerce_int
+from app.sources.base import SourceResult, SourceStatus, canonical_name, coerce_int
+from app.sources.seed import SEEDS_DIR, SeedSource
 from app.sources.seed import normalize_evidence as seed_normalize_evidence
 
 
@@ -580,14 +589,16 @@ class ApolloEmptyOrgGroundingTests(unittest.TestCase):
         self.assertEqual(reasons[0].evidence_key, "name")
         self.assertEqual(reasons[0].evidence_value, "Unknown company")
 
-    def test_fully_blank_evidence_yields_zero_reasons_not_a_fabricated_one(self):
-        # A hypothetical source row with nothing usable at all, not even a
-        # name: honestly reporting "no reasons" beats inventing a citation
-        # that doesn't match the evidence.
+    def test_fully_blank_evidence_raises_instead_of_yielding_a_citation_free_score(self):
+        # Correction 2 (second hardening pass): a hypothetical source row
+        # with nothing usable at all, not even a name, violates the
+        # source/evidence contract every real Source now upholds (a
+        # guaranteed nonblank "name" — see canonical_name / Correction 1).
+        # A citation-free score must never be persisted (SPEC.md), so this
+        # is now a hard failure, not an honest-but-silent (0, []).
         evidence = {"name": None, "industry": None, "employees": None, "country": None, "domain": None}
-        score, reasons = _heuristic(_canonical_brief(), evidence)
-        self.assertEqual(score, 0)
-        self.assertEqual(reasons, [])
+        with self.assertRaises(scoring.UngroundedEvidenceError):
+            _heuristic(_canonical_brief(), evidence)
 
 
 class StemmingTests(unittest.TestCase):
@@ -686,6 +697,289 @@ class EmployeesCoercionTests(unittest.TestCase):
         }
         score, reasons = _heuristic(_canonical_brief(), evidence)  # must not raise
         self.assertFalse(any(r.evidence_key == "employees" for r in reasons))
+
+    # --- Second hardening pass: NaN, +-infinity, non-integral floats -------
+
+    def test_coerce_int_accepts_a_finite_integral_float(self):
+        self.assertEqual(coerce_int(180.0), 180)
+
+    def test_coerce_int_rejects_a_non_integral_float_instead_of_truncating(self):
+        # 180.5 employees isn't a real count; guessing via truncation would
+        # misrepresent the evidence, so it becomes unavailable, not 180.
+        self.assertIsNone(coerce_int(180.5))
+
+    def test_coerce_int_rejects_nan_without_raising(self):
+        self.assertIsNone(coerce_int(float("nan")))
+
+    def test_coerce_int_rejects_positive_infinity_without_raising(self):
+        self.assertIsNone(coerce_int(float("inf")))
+
+    def test_coerce_int_rejects_negative_infinity_without_raising(self):
+        self.assertIsNone(coerce_int(float("-inf")))
+
+    def test_heuristic_treats_nan_employees_as_unavailable_not_a_crash(self):
+        evidence = {
+            "name": "Acme", "industry": "Wholesale distribution",
+            "employees": float("nan"), "country": "United States", "domain": "acme.com",
+        }
+        score, reasons = _heuristic(_canonical_brief(), evidence)  # must not raise
+        self.assertFalse(any(r.evidence_key == "employees" for r in reasons))
+
+    def test_heuristic_treats_infinite_employees_as_unavailable_not_a_crash(self):
+        evidence = {
+            "name": "Acme", "industry": "Wholesale distribution",
+            "employees": float("inf"), "country": "United States", "domain": "acme.com",
+        }
+        score, reasons = _heuristic(_canonical_brief(), evidence)  # must not raise
+        self.assertFalse(any(r.evidence_key == "employees" for r in reasons))
+
+    def test_score_batch_does_not_raise_for_nan_employees(self):
+        # End-to-end through score_batch (zero-key path), not just _heuristic
+        # directly — confirms the "never raises" contract holds at the
+        # public entry point too.
+        evidence_list = [{
+            "name": "Acme", "industry": "Wholesale distribution",
+            "employees": float("nan"), "country": "United States", "domain": "acme.com",
+        }]
+        outcome = scoring.score_batch(_canonical_brief(), evidence_list, {})  # must not raise
+        self.assertEqual(outcome.status, ScoreStatus.NO_GEMINI_KEY)
+
+
+# --- Second hardening pass: four corrections requested before Slice 4 -----
+
+
+class CanonicalNameTests(unittest.TestCase):
+    """Correction 1: one canonical, nonblank name, however the raw value
+    arrived — missing, None, empty, or whitespace-only all collapse to the
+    same fallback (dict.get() already makes "missing key" and "explicit
+    None" identical by the time canonical_name sees them)."""
+
+    def test_none_becomes_fallback(self):
+        self.assertEqual(canonical_name(None), "Unknown company")
+
+    def test_empty_string_becomes_fallback(self):
+        self.assertEqual(canonical_name(""), "Unknown company")
+
+    def test_whitespace_only_becomes_fallback(self):
+        self.assertEqual(canonical_name("   "), "Unknown company")
+
+    def test_valid_name_is_kept_and_stripped(self):
+        self.assertEqual(canonical_name("Acme Corp"), "Acme Corp")
+        self.assertEqual(canonical_name("  Acme Corp  "), "Acme Corp")
+
+    def test_custom_fallback_is_honored(self):
+        self.assertEqual(canonical_name(None, fallback="N/A"), "N/A")
+
+    def test_non_string_input_becomes_fallback(self):
+        self.assertEqual(canonical_name(12345), "Unknown company")
+
+
+class ApolloNameConsistencyTests(unittest.TestCase):
+    """Correction 1: Candidate.name and normalized evidence["name"] must be
+    identical for every accepted Apollo organization shape — the original
+    bug was two different fallback expressions for the same value."""
+
+    def _assert_consistent(self, org: dict) -> tuple[Candidate, dict]:
+        candidate = ApolloSource._to_candidate(org)
+        evidence = apollo_normalize_evidence(candidate.raw)
+        self.assertEqual(candidate.name, evidence["name"])
+        self.assertTrue(candidate.name.strip())  # never blank
+        return candidate, evidence
+
+    def test_missing_name_key(self):
+        candidate, _ = self._assert_consistent({"id": 1})
+        self.assertEqual(candidate.name, "Unknown company")
+
+    def test_null_name_value(self):
+        candidate, _ = self._assert_consistent({"id": 1, "name": None})
+        self.assertEqual(candidate.name, "Unknown company")
+
+    def test_empty_string_name(self):
+        candidate, _ = self._assert_consistent({"id": 1, "name": ""})
+        self.assertEqual(candidate.name, "Unknown company")
+
+    def test_whitespace_only_name(self):
+        candidate, _ = self._assert_consistent({"id": 1, "name": "   "})
+        self.assertEqual(candidate.name, "Unknown company")
+
+    def test_valid_name(self):
+        candidate, _ = self._assert_consistent({"id": 1, "name": "Acme Corp"})
+        self.assertEqual(candidate.name, "Acme Corp")
+
+
+class SeedBlankNameTests(unittest.TestCase):
+    """Correction 1: seed rows are OUR curated data — a blank or missing
+    name is a data-quality bug in seeds/companies.json, not messy external
+    input to tolerate. It must fail through the existing controlled
+    SEED_ERROR path, never become a malformed persisted target."""
+
+    def _search_with_companies(self, companies: list[dict]) -> SourceResult:
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds_dir = Path(tmp)
+            (seeds_dir / "companies.json").write_text(json.dumps(companies), encoding="utf-8")
+            with mock.patch("app.sources.seed.SEEDS_DIR", seeds_dir):
+                return SeedSource("business").search(_canonical_brief())
+
+    def test_missing_name_key_is_seed_error(self):
+        result = self._search_with_companies([{"country": "United States", "employees": 10}])
+        self.assertEqual(result.status, SourceStatus.SEED_ERROR)
+
+    def test_empty_string_name_is_seed_error(self):
+        result = self._search_with_companies(
+            [{"name": "", "country": "United States", "employees": 10}]
+        )
+        self.assertEqual(result.status, SourceStatus.SEED_ERROR)
+
+    def test_whitespace_only_name_is_seed_error(self):
+        result = self._search_with_companies(
+            [{"name": "   ", "country": "United States", "employees": 10}]
+        )
+        self.assertEqual(result.status, SourceStatus.SEED_ERROR)
+
+    def test_valid_name_is_ok(self):
+        result = self._search_with_companies(
+            [{"name": "Acme Co", "country": "United States", "employees": 10}]
+        )
+        self.assertEqual(result.status, SourceStatus.OK)
+        self.assertEqual(len(result.candidates), 1)
+
+
+class AssertGroundedTests(unittest.TestCase):
+    """Correction 2: assert_grounded is a persistence-level safety net,
+    independent of score_batch's own internal guarantee."""
+
+    def test_passes_silently_for_well_formed_scores(self):
+        evidence_list = [{"name": "Acme", "industry": None, "employees": None, "country": None, "domain": None}]
+        scores = [
+            TargetScore(
+                fit_score=10,
+                reasons=[FitReason(reason="r", evidence_key="name", evidence_value="Acme")],
+                scored_by="heuristic",
+            )
+        ]
+        scoring.assert_grounded(evidence_list, scores)  # must not raise
+
+    def test_raises_when_a_score_has_zero_reasons(self):
+        evidence_list = [{"name": "Acme"}]
+        scores = [TargetScore(fit_score=10, reasons=[], scored_by="heuristic")]
+        with self.assertRaises(UngroundedEvidenceError):
+            scoring.assert_grounded(evidence_list, scores)
+
+    def test_raises_when_a_reason_does_not_ground_against_its_evidence(self):
+        evidence_list = [{"name": "Acme", "industry": "Retail"}]
+        scores = [
+            TargetScore(
+                fit_score=10,
+                reasons=[FitReason(reason="fabricated", evidence_key="industry", evidence_value="Fabricated")],
+                scored_by="heuristic",
+            )
+        ]
+        with self.assertRaises(UngroundedEvidenceError):
+            scoring.assert_grounded(evidence_list, scores)
+
+
+class AssertGroundedRouteTests(unittest.TestCase):
+    """Correction 2, at the route level: an ungrounded score — however it
+    got produced — must never reach the database."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self._db_patch = mock.patch.object(db, "DB_PATH", Path(self._tmpdir.name) / "outpost.db")
+        self._db_patch.start()
+        self._env_patch = mock.patch.dict(os.environ, {}, clear=False)
+        self._env_patch.start()
+        os.environ.pop("GEMINI_API_KEY", None)
+        db.init()
+
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        self._client_ctx = TestClient(app)
+        self.client = self._client_ctx.__enter__()
+        self.workspace_id = db.create_workspace("Test WS")
+        self.client.cookies.set("workspace_id", str(self.workspace_id))
+
+    def tearDown(self):
+        self._client_ctx.__exit__(None, None, None)
+        self._env_patch.stop()
+        self._db_patch.stop()
+        self._tmpdir.cleanup()
+
+    def test_ungrounded_score_never_reaches_the_database(self):
+        candidate = Candidate(source="seed", name="Acme", raw={"name": "Acme"})
+        one_target = SourceResult([candidate], SourceStatus.OK, "seed", "seed", None)
+        bad_outcome = scoring.ScoreOutcome(
+            scores=[
+                TargetScore(
+                    fit_score=50,
+                    reasons=[FitReason(reason="fabricated", evidence_key="industry", evidence_value="Fabricated")],
+                    scored_by="heuristic",
+                )
+            ],
+            status=ScoreStatus.LLM_OK, llm_scored=1, heuristic_scored=0, reason=None,
+        )
+        with mock.patch("app.main.sources.discover", return_value=one_target), \
+             mock.patch("app.main.scoring.score_batch", return_value=bad_outcome):
+            with self.assertRaises(UngroundedEvidenceError):
+                self.client.post(
+                    "/campaigns",
+                    data={"promoting_what": "test", "target_type": "business"},
+                    follow_redirects=False,
+                )
+        # The campaign row itself is created before scoring runs (route step
+        # 2), but no target row must exist — assert_grounded raised before
+        # add_scored_targets ever ran.
+        campaigns = db.list_campaigns(self.workspace_id)
+        self.assertEqual(len(campaigns), 1)
+        self.assertEqual(db.list_targets(self.workspace_id, campaigns[0]["id"]), [])
+
+
+class NaturalNicheDilutionTests(unittest.TestCase):
+    """Correction 3: the exact "US distributors for magnesium" brief (the
+    zero-key demo's own natural phrasing) must produce real score
+    separation, not have every seed target diluted below the UI's
+    normal-text threshold by geography noise in the free-text
+    niche_or_industry.
+
+    Builds the Brief via intake._heuristic_brief — the actual function the
+    real zero-key route calls — rather than hand-constructing one, so this
+    test can't drift from what the app really produces. (A first version of
+    this test hand-built a Brief with product="magnesium supplements"
+    distinct from niche_or_industry; that's not what the real heuristic
+    intake path does — it sets product to the identical raw sentence as
+    niche_or_industry — and testing against that unrealistic shape masked a
+    bug where the fix's product-exclusion logic nullified itself in the
+    real path. Routing through the real function closes that gap.)
+    """
+
+    @staticmethod
+    def _us_seed_evidence() -> list[dict]:
+        companies = json.loads((SEEDS_DIR / "companies.json").read_text(encoding="utf-8"))
+        us_companies = [c for c in companies if c.get("country") == "United States"]
+        return [seed_normalize_evidence(c) for c in us_companies]
+
+    def test_natural_magnesium_distributor_brief_produces_score_separation(self):
+        brief = _heuristic_brief("US distributors for magnesium", "business")
+        evidence_list = self._us_seed_evidence()
+        results = [_heuristic(brief, ev) for ev in evidence_list]
+        scores = [score for score, _ in results]
+
+        # At least one clearly relevant distributor clears the UI's
+        # normal-text threshold (design.md: >=70 renders as a strong fit).
+        self.assertTrue(any(score >= 70 for score in scores), scores)
+
+        # The deliberately weak seed company remains a clear non-match.
+        weak_index = next(i for i, ev in enumerate(evidence_list) if ev["name"] == "Lakeside Software Studio")
+        self.assertLess(scores[weak_index], 70)
+
+        # Every reason for every target stays grounded and honest.
+        for evidence, (score, reasons) in zip(evidence_list, results):
+            self.assertTrue(reasons)
+            for reason in reasons:
+                self.assertTrue(_is_grounded(reason, evidence), (evidence, reason))
+                if reason.evidence_key == "industry":
+                    self.assertNotIn("product", reason.reason)
 
 
 if __name__ == "__main__":

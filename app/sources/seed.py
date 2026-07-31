@@ -80,7 +80,7 @@ class SeedSource(Source):
                 )
             try:
                 candidates.append(self._to_candidate(company))
-            except (KeyError, TypeError, ValidationError):
+            except (KeyError, TypeError, ValueError, ValidationError):
                 return self._result(
                     [], SourceStatus.SEED_ERROR, "seed data contained a malformed company row"
                 )
@@ -94,6 +94,16 @@ class SeedSource(Source):
 
     @staticmethod
     def _to_candidate(company: dict) -> Candidate:
+        # Seed data is curated by us, not an external provider — a blank
+        # name here is a genuine data-quality bug in seeds/companies.json,
+        # not messy real-world input to paper over. Reject it through the
+        # existing SEED_ERROR path (never persist a malformed target)
+        # instead of silently substituting a fallback the way Apollo's
+        # untrusted, external data does.
+        name = company["name"]  # missing key -> KeyError -> SEED_ERROR, same as before
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("seed company row had a blank name")
+
         location = ", ".join(
             part
             for part in (company.get("city"), company.get("state"), company.get("country"))
@@ -103,7 +113,7 @@ class SeedSource(Source):
         return Candidate(
             source="seed",
             external_id=None,
-            name=company["name"],
+            name=name,
             handle_or_domain=company.get("domain"),
             reach=company.get("employees"),
             location=location,

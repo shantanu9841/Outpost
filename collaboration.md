@@ -761,3 +761,119 @@ or coding sessions. It complements, but does not replace:
   `app/models.py` (`OutreachDraft`) and `app/agent/drafting.py`, then the
   `draft` table + DB functions, then the routes/nav/UI, then the retained
   tests in §11.1, then the §11.2 no-key and live-Gemini verification.
+
+## 2026-07-31 — Slice 3 second hardening pass: four more findings fixed before Slice 4
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 3 hardening, second pass (narrowly scoped correction pass
+  requested explicitly before starting Slice 4; SLICE_4_PLAN.md and Slice 4
+  implementation were not touched)
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Fixed four owner-specified corrections against
+  the just-committed Slice 3 hardening code, each verified against the
+  actual code before changing anything, and each confirmed live (not just
+  via retained tests) before this commit. (1) Apollo's `_to_candidate` used
+  `org.get("name", "Unknown company")` (default fires only on a missing
+  key) while `normalize_evidence` used `raw.get("name") or "Unknown
+  company"` (default fires on any falsy value) — two different expressions
+  over the same value meant `{"name": ""}` could persist a blank
+  `Candidate.name` while evidence read `"Unknown company"`. Added
+  `app/sources/base.py`'s `canonical_name(raw_name, fallback)`, used
+  identically at both call sites so the two can never diverge again. Seed
+  data (ours, not external/untrusted) took the opposite fix: a blank or
+  missing name in `seeds/companies.json` now raises inside
+  `SeedSource._to_candidate` (caught by `search()`'s existing `except`,
+  with `ValueError` added to that tuple) and routes through the existing
+  `SEED_ERROR` path rather than ever becoming a `Candidate`. (2) The
+  heuristic's fully-blank-evidence fallback returned `(0, [])` — a
+  citation-free score, contradicting SPEC.md's "no score without a
+  citation." `_heuristic()` now raises a new `UngroundedEvidenceError`
+  instead when even the name field is unusable, and a new
+  `scoring.assert_grounded(evidence_list, scores)` is called in
+  `create_campaign` immediately before `db.add_scored_targets` as an
+  independent, persistence-level second check (it doesn't trust that
+  `_heuristic()` or the LLM-grounding path in `_apply_batch()` got it
+  right). (3) The exact "US distributors for magnesium" demo phrase scored
+  every seed company below the UI's 70-point threshold even after the
+  first pass's stemming fix, because the niche text's incidental short
+  words ("us") still inflated the industry-overlap denominator. Fixed with
+  a general, length-based exclusion (`_significant_niche_tokens`: stemmed
+  tokens shorter than 3 characters are dropped from the denominator) — not
+  by hardcoding the phrase or any company name. A first attempt at this fix
+  also tried excluding tokens shared with `brief.product`, and the retained
+  test (which had hand-built a `Brief` with `product` deliberately
+  different from `niche_or_industry`) passed — but live verification
+  against the real app caught that this was wrong: `intake._heuristic_brief`
+  (the actual zero-key code path) sets `brief.product` to the *identical*
+  raw sentence as `niche_or_industry`, so that exclusion always emptied
+  itself out via its own safety fallback and never once fired on real
+  traffic. Removed the dead exclusion once understood, and rewrote the
+  retained test to build its `Brief` via the real `intake._heuristic_brief`
+  function instead of an idealized hand-built one, so it can't drift from
+  reality the same way again. (4) `coerce_int()` raised on `NaN` and
+  `+-infinity` (`int(float("nan"))`/`int(float("inf"))` both raise in plain
+  Python) and silently truncated non-integral floats like `180.5` to `180`.
+  Now checks `math.isfinite()` and integrality before converting; anything
+  that fails either check becomes `None`, same as an unparseable string.
+- Files or areas affected: `app/sources/base.py` (`canonical_name`,
+  `coerce_int`'s NaN/inf/non-integral handling), `app/sources/apollo.py`
+  (`canonical_name` at both call sites), `app/sources/seed.py` (blank-name
+  rejection), `app/agent/scoring.py` (`UngroundedEvidenceError`,
+  `assert_grounded`, the heuristic fallback raise, `_significant_niche_tokens`
+  and its industry-block comment), `app/main.py` (`assert_grounded` wired
+  into `create_campaign` before persistence, comment renumbering),
+  `tests/test_slice3_scoring.py` (28 new tests across
+  `CanonicalNameTests`, `ApolloNameConsistencyTests`, `SeedBlankNameTests`,
+  `AssertGroundedTests`, `AssertGroundedRouteTests`,
+  `NaturalNicheDilutionTests`, and additions to `EmployeesCoercionTests`;
+  one existing test — the fully-blank-evidence case — updated to assert the
+  new raise instead of the old `(0, [])`), plus this entry, `PROGRESS.md`,
+  and `DECISIONS.md`. `SLICE_4_PLAN.md` was not opened or modified.
+- Verification: `python -m unittest discover -s tests` — 100 tests passed
+  (28 new, none removed; the one updated test now asserts
+  `UngroundedEvidenceError` instead of `(0, [])`). Focused diagnostic
+  scripts (not retained, run directly against the fixed functions): Apollo
+  name consistency across `{}`, `{"name": None}`, `{"name": ""}`,
+  `{"name": "   "}`, `{"name": "Acme Corp"}` — `Candidate.name` and
+  `evidence["name"]` identical in every case; fully-blank evidence
+  confirmed to raise `UngroundedEvidenceError` rather than score silently;
+  `coerce_int` confirmed correct for `180`, `180.0`, `180.5`, `nan`, `inf`,
+  `-inf`, `"180"`, `"nope"`, `True`, `None`. Live, in a scratch workspace
+  ("Slice 3 Hardening 2 Verify", created with zero keys, no Apollo/Gemini
+  key touched): a business campaign for "US distributors for magnesium"
+  was created twice — the first attempt (before a full server restart)
+  still showed pre-fix scores despite a logged `WatchFiles... Reloading`
+  event, which turned out to be a stale-reload artifact, not a code defect;
+  caught by checking the *persisted* `outpost.db` fit_score values directly
+  rather than trusting the rendered page, and confirmed fixed after
+  stopping the server, clearing `__pycache__`, and a clean restart. The
+  corrected, final scores: Northbridge Distribution Co. 70, Cascade
+  Logistics Partners 40, Meridian Health Supply 60, Ironclad Freight
+  Solutions 40, Summit Supply Chain Group 40, Cornerstone Wellness
+  Distributors 60, Lakeside Software Studio 20 — at least one clearly
+  relevant distributor (Northbridge) at or above 70, Lakeside still well
+  below, every expanded reason grounded (confirmed via the caret toggle),
+  page loaded without error. Confirmed no real provider calls (Apollo/
+  Gemini both absent from this workspace's settings), no credentials read
+  or logged, `outpost.db` not reset or deleted (three new scratch
+  workspaces/campaigns added as normal product data, same as every prior
+  slice's verification), and `git diff --check` clean (only expected
+  LF/CRLF line-ending notices, no real whitespace errors); `git diff` and
+  the final file list contain no credential-shaped strings.
+- Known limitations: The industry-overlap heuristic's length-based
+  exclusion is still a blunt instrument — it happens to remove "us" because
+  it's short, not because it recognizes country references specifically;
+  a future niche phrase diluted by a *long* incidental word (a product name
+  that isn't also short) would not be caught by this fix, same category of
+  known limitation as the first hardening pass's stemmer being "minimal, not
+  a real stemmer." The `UngroundedEvidenceError` raise path (both in
+  `_heuristic()` and in `assert_grounded()`) remains unreachable by either
+  current source given this pass's own fixes — a defensive guarantee for a
+  case that shouldn't occur today, exercised only by direct unit tests, not
+  by any live path.
+- Next action: Owner reviews and merges/pushes this branch as desired. Once
+  merged, Slice 4 (drafting, approval queue, pipeline) is next — model
+  recommendation and plan review are still owed before that implementation
+  begins, per CLAUDE.md. `SLICE_4_PLAN.md` (already committed) is untouched
+  by this correction pass.

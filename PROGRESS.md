@@ -176,6 +176,36 @@ Verified the stemming fix reproduces the exact anchor-table scores
 unchanged (regression guard) while fixing the demonstrated live-phrase gap
 by direct script.
 
+**A second, narrowly-scoped Slice 3 hardening pass** (still before Slice 4)
+fixed four more findings: Apollo's `_to_candidate` and `normalize_evidence`
+used two subtly different fallback expressions for a blank company name
+(`.get(k, default)` vs `.get(k) or default`), so `{"name": ""}` could
+persist a blank `Candidate.name` while evidence read `"Unknown company"` —
+both now go through one shared `canonical_name()` helper, and a blank name
+in *seed* data (which we curate, unlike Apollo's external payloads) now
+fails through the existing `SEED_ERROR` path instead of silently persisting
+a malformed target. The heuristic's fully-blank-evidence fallback returned
+`(0, [])` — a citation-free score, contradicting "no score without a
+citation" — it now raises a new `UngroundedEvidenceError` instead, and
+`scoring.assert_grounded()` re-checks every score independently right
+before `db.add_scored_targets` as a second, persistence-level safety net.
+The exact "US distributors for magnesium" demo phrase still scored every
+seed company below the UI's 70-point threshold even after the stemming fix,
+because the niche text's incidental words ("us", "magnesium") diluted the
+industry-overlap denominator; a length-based token filter (`<3` characters)
+fixes this generally — Northbridge Distribution Co. now scores 70. An
+earlier version of this fix tried excluding tokens shared with
+`brief.product`, but live verification (not just the retained test, which
+had used an unrealistic hand-built `Brief`) caught that `product` and
+`niche_or_industry` are the *same string* on the real zero-key intake path,
+so that exclusion silently never fired — removed once the real bug was
+understood. Finally, `coerce_int()` raised on `NaN`/`+-infinity` (Python's
+own `int()` does) and silently truncated non-integral floats like `180.5`;
+both are now `None`. 28 new retained tests (100 total); live-verified end to
+end in a scratch workspace with a hard server restart (a stale
+`uvicorn --reload` initially served pre-fix code, caught by checking
+persisted DB values, not just the rendered page).
+
 ## Slice checklist
 - [x] Slice 0: Foundation (scaffold, git, styled shell, theme toggle)
 - [x] Slice 1: Workspaces and BYO-key settings

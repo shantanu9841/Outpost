@@ -15,6 +15,13 @@ If intake already learned this same Gemini key is rejected earlier in the
 same request, the caller passes known_invalid_key_reason so scoring skips
 its own live call rather than asking an already-rejected credential a second
 question.
+
+"No score without a citation" (SPEC.md) is upheld two ways: the heuristic
+always grounds at least one reason (it relies on a source/evidence contract —
+every Source's normalize_evidence() must guarantee a nonblank "name" field —
+and raises UngroundedEvidenceError if that contract is ever violated, rather
+than silently returning a citation-free score), and assert_grounded() is a
+second, independent check callers run just before persistence.
 """
 
 import json
@@ -63,6 +70,21 @@ class ScoreOutcome:
     reason: str | None  # sanitized, safe for UI/audit; None unless a failure occurred
 
 
+class UngroundedEvidenceError(RuntimeError):
+    """Raised when a score has no citation, or a citation that doesn't
+    ground against its target's own evidence — the "no score without a
+    citation" guarantee (SPEC.md) about to be violated.
+
+    Should be unreachable in normal operation: every current Source's
+    normalize_evidence() guarantees a nonblank "name" field, so the
+    heuristic can always ground at least one reason, and the LLM path is
+    already checked reason-by-reason before being trusted (_apply_batch).
+    A raise here means a Source (or a future one) violated that contract —
+    controlled invalid source/evidence data, not something to paper over
+    with a fabricated citation or a silently empty reasons list.
+    """
+
+
 def score_batch(
     brief: Brief,
     evidence_list: list[dict],
@@ -74,7 +96,11 @@ def score_batch(
 
     Falls back to the deterministic heuristic per-target whenever the LLM is
     unavailable, fails, or returns an assessment that doesn't ground to that
-    target's own evidence. Never raises.
+    target's own evidence. Never raises for a well-formed evidence dict — one
+    whose Source honored the nonblank-"name" contract (see
+    UngroundedEvidenceError). Raises only if that contract itself was
+    violated, which is a bug in the Source, not an operational condition
+    callers need to handle.
 
     known_invalid_key_reason: set by the caller when this same Gemini key was
     already rejected earlier in the same request (during intake). Skips the
@@ -188,6 +214,26 @@ def _is_grounded(reason: FitReason, evidence: dict) -> bool:
     return _norm(value) == _norm(reason.evidence_value)
 
 
+def assert_grounded(evidence_list: list[dict], scores: list[TargetScore]) -> None:
+    """Defense-in-depth check: run just before persistence, not instead of
+    score_batch upholding "no score without a citation" on its own.
+
+    evidence_list and scores must be aligned 1:1 (the same order score_batch
+    was called and returned with). Raises UngroundedEvidenceError if any
+    score has zero reasons, or any reason doesn't ground against that same
+    target's evidence — covering both the LLM path and the heuristic path,
+    and any future scoring path, with one independent check.
+    """
+    for evidence, score in zip(evidence_list, scores):
+        if not score.reasons:
+            raise UngroundedEvidenceError("a target score has zero reasons")
+        for reason in score.reasons:
+            if not _is_grounded(reason, evidence):
+                raise UngroundedEvidenceError(
+                    f"citation {reason.evidence_key!r} does not match its target's evidence"
+                )
+
+
 # --- Deterministic heuristic (demo-mode / no-key path) ----------------------
 
 
@@ -220,6 +266,37 @@ def _stemmed_tokens(text: str | None) -> set[str]:
     return {_stem(w) for w in _tokens(text)}
 
 
+def _significant_niche_tokens(niche_or_industry: str | None) -> set[str]:
+    """Stemmed niche/industry tokens, with short tokens excluded before
+    they're used as the industry-overlap denominator.
+
+    A free-text niche_or_industry description (the zero-key heuristic
+    intake path sets this to the user's raw sentence, up to 80 characters)
+    often includes an incidental geography abbreviation ("US distributors
+    for magnesium") that isn't itself an industry descriptor. A token
+    shorter than 3 characters is almost never a substantive industry word
+    on its own, so counting it in the denominator unfairly dilutes a
+    genuine industry match. This is general — not tied to any specific
+    brief, company, or word list; it excludes by length, not by content.
+
+    (An earlier version of this function also tried to exclude tokens
+    shared with brief.product, on the theory that the product name leaking
+    into free-text niche input is dilution too. That doesn't work: the same
+    zero-key heuristic intake path that produces this free-text niche also
+    sets brief.product to the identical raw sentence, so "product" and
+    "niche" tokens are always the same set there — the exclusion emptied
+    itself out via its own safety fallback and never fired. Removed rather
+    than kept as dead code.)
+
+    Falls back to the raw tokens if the length filter would empty the set —
+    losing the ability to match anything at all would be worse than the
+    dilution this function exists to fix.
+    """
+    niche_tokens = _stemmed_tokens(niche_or_industry)
+    significant = {t for t in niche_tokens if len(t) >= 3}
+    return significant or niche_tokens
+
+
 def _heuristic_score(brief: Brief, evidence: dict) -> TargetScore:
     score, reasons = _heuristic(brief, evidence)
     return TargetScore(score, reasons, "heuristic")
@@ -233,23 +310,24 @@ def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
     points and emits no reason (a reason can't cite a value that isn't
     there); a component whose field IS present always emits exactly one
     reason, whether or not it scored well, so a fabricated citation is never
-    needed to explain a low score.
+    needed to explain a low score. Raises UngroundedEvidenceError in the one
+    case where even the final name-only fallback (see below) has nothing to
+    cite — see that exception's docstring.
     """
     total = 0
     reasons: list[FitReason] = []
 
     industry = evidence.get("industry")
     if industry:
-        niche_tokens = _stemmed_tokens(brief.niche_or_industry)
+        niche_tokens = _significant_niche_tokens(brief.niche_or_industry)
         overlap = len(niche_tokens & _stemmed_tokens(industry))
         points = round(60 * overlap / max(1, len(niche_tokens)))
         total += points
         reason_text = (
             f"Industry overlaps with the brief's niche ({overlap} matching term(s))"
             if overlap
-            # niche_or_industry is the only field this component examines —
-            # brief.product is never read here, so the explanation must not
-            # claim otherwise.
+            # This component only evaluates niche_or_industry — brief.product
+            # is never read here, so the explanation must not claim otherwise.
             else "Industry doesn't match the brief's niche"
         )
         reasons.append(FitReason(reason=reason_text, evidence_key="industry", evidence_value=str(industry)))
@@ -284,21 +362,26 @@ def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
         reasons.append(FitReason(reason=reason_text, evidence_key="country", evidence_value=str(country)))
 
     if not reasons:
-        # No usable evidence field at all: cite the one thing a real
-        # candidate always has (name) rather than a fabricated placeholder —
-        # citing anything that isn't the literal evidence value would itself
-        # be an ungrounded reason, the exact thing this module exists to
-        # prevent. If even the name is unavailable, there is truly nothing
-        # left to ground a citation to; an honest zero-reason score is
-        # better than inventing one.
+        # No usable industry/employees/country field at all: cite the one
+        # field every Source's normalize_evidence() is contractually
+        # required to leave nonblank (name) rather than a fabricated
+        # placeholder — citing anything that isn't the literal evidence
+        # value would itself be an ungrounded reason, the exact thing this
+        # module exists to prevent. A blank name here means that contract
+        # was violated; raise rather than silently persist a citation-free
+        # score (SPEC.md's "no score without a citation" is a guarantee,
+        # not a best-effort).
         name = evidence.get("name")
-        if name:
-            reasons.append(
-                FitReason(
-                    reason="No structured evidence fields (industry, size, or country) were available to score",
-                    evidence_key="name",
-                    evidence_value=str(name),
-                )
+        if not isinstance(name, str) or not name.strip():
+            raise UngroundedEvidenceError(
+                "evidence has no industry/employees/country and no usable name to cite"
             )
+        reasons.append(
+            FitReason(
+                reason="No structured evidence fields (industry, size, or country) were available to score",
+                evidence_key="name",
+                evidence_value=name.strip(),
+            )
+        )
 
     return min(100, max(0, total)), reasons
