@@ -10,7 +10,9 @@ Slices 0–4 are implemented and committed. The retained baseline is **171 passi
 python -m unittest discover -s tests
 ```
 
-Slice 5 — creator sources and demo mode — is next. No Slice 5 plan or implementation exists yet.
+Slice 5 — creator sources and demo mode — is next. Its planning-only document
+exists at `docs/plans/SLICE_5_PLAN.md` and includes the owner-approved review
+corrections. Slice 5 implementation has not been approved or started.
 
 ## Implemented product
 
@@ -60,7 +62,11 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
 - `add_draft` identifies the active-draft unique-index race through SQLite's error-message columns because the driver exposes no constraint-specific exception.
 - SQLite uses its default five-second lock timeout; lock exhaustion is not specially translated.
 - Draft grounding uses normalized substring matching for prose, so a short evidence value can match incidentally.
-- Creator-source actor choice, pricing, and free-quota behavior remain unverified until Slice 5 research.
+- Creator actor inputs, current pricing, YouTube quota behavior, and provider
+  transport controls have been researched against official documentation for
+  the Slice 5 plan. Live provider failure mappings remain explicit assumptions
+  except for safely reproducible cases; the plan requires mocked retained tests
+  and forbids inducing them by exhausting quota or creating billing errors.
 
 ## Slice checklist
 
@@ -72,15 +78,17 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
 - [ ] Slice 5: Creator sources and demo mode
 - [ ] Slice 6: Evaluation and cost-aware routing
 
-## Next action: plan Slice 5
+## Next action: approve the corrected Slice 5 plan
 
-Before approving a Slice 5 implementation plan:
+Before Slice 5 implementation begins:
 
-1. Verify the current maintained Apify Instagram/TikTok actors, pricing, input/output contracts, and free/demo behavior.
-2. Verify whether YouTube Data API search and its free quota support the intended creator discovery path.
-3. Reuse the existing Source/`SourceResult` contract and normalized-evidence boundary; do not create provider-specific discovery flows.
-4. Preserve a complete zero-key demo path.
-5. Recommend planning and execution models and wait for owner confirmation as required by `CLAUDE.md`.
+1. Owner confirms no planning corrections remain outstanding.
+2. Owner explicitly approves implementation and confirms the required model switch.
+3. Implementation follows `docs/plans/SLICE_5_PLAN.md`, beginning with only
+   the safe live checks permitted by §7.2; it must not intentionally reproduce
+   quota, rate-limit, billing, plan, or paid-run failures.
+4. Preserve the shared Source/`SourceResult` and normalized-evidence contracts
+   and the complete zero-key demo path.
 
 ## Relevant references
 

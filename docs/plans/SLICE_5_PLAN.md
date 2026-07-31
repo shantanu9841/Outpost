@@ -1,9 +1,10 @@
 # Slice 5 Plan — Creator sources and demo mode
 
 **Status:** Planning only. Owner-approved on 2026-07-31 with the ten decisions
-in §1. No application code, tests, seeds, templates, or schema change is part
-of this commit. Implementation does not begin until the owner (and SDE 2's
-review) confirm this plan and the model switch.
+in §1; SDE 2's owner-approved implementation-readiness corrections are now
+incorporated. No application code, tests, seeds, templates, or schema change is
+part of this commit. Implementation does not begin until the owner gives final
+approval and confirms the model switch.
 
 **Model:** Planned on Opus. Execution recommendation is **Sonnet** (mechanical
 implementation from this approved plan); confirm the switch at the top of
@@ -123,10 +124,12 @@ duration and cost.
 - **Start-run + bounded polling, not run-sync (correction 3).** Apify's
   `run-sync-get-dataset-items` endpoint waits up to 300 s on one held
   connection and is not robust for a new integration. Instead:
-  1. **Start:** `POST https://api.apify.com/v2/acts/<actorId>/runs` with the
+  1. **Start:** `POST https://api.apify.com/v2/actors/<actorId>/runs` with the
      JSON input body and the Bearer header, plus run-bounding query
      parameters (all confirmed official at
-     https://docs.apify.com/api/v2/act-runs-post):
+     https://docs.apify.com/api/v2/actors-runs-post). Use the canonical
+     `/v2/actors/` prefix for this new integration; `/v2/acts/` is a
+     deprecated compatibility alias and must not be introduced:
      - `timeout=<run_timeout_secs>` — hard actor-run duration cap (default
        **120**).
      - `maxItems=<N>` — caps the number of charged pay-per-result items
@@ -332,6 +335,20 @@ final fallback and `assert_grounded` rely on); `followers` via `coerce_int`.
 Each creator source's `normalize_evidence` maps its own raw fields into this
 one shape, so scoring never reads provider-specific keys.
 
+**Persisted platform provenance.** `target.source` remains the source-level
+value (`"youtube"`, `"apify"`, or `"seed"`) required by the existing shared
+contract; an Apify batch therefore does not overload it with actor-specific
+values. Instead, every creator source adds a controlled
+`raw["_outpost_platform"]` value (`"youtube"`, `"instagram"`, or `"tiktok"`)
+when constructing each `Candidate`. This marker is set from the selected
+source/actor constant, never copied from an untrusted provider field. Creator
+seed rows receive the same controlled marker during candidate construction.
+The evidence normalizers use that marker for the canonical `platform` field,
+and `campaign_detail` exposes it to the template as `target["platform"]` after
+reading persisted `raw_json`. This preserves Instagram/TikTok identity through
+the existing batch-level `source_name="apify"` database write without a schema
+migration or provider-shape logic in the template.
+
 ### 6.2 `evidence_for(source_used, target_type, candidate)` (decision 9)
 
 The current registry keys normalizers by `source_used` alone, but seed serves
@@ -511,13 +528,39 @@ criteria, each with at least one test:
     an injected fake key inside a provider error is redacted before audit.
 14. **Zero-key demo (integration-style, mocked/seed):** creator campaign →
     seed discovery → creator scoring → draft → approve → pipeline completes.
+15. **Transport authentication and bounds (corrections 2/3):** mocked request
+    assertions prove every Apify start/poll/fetch call sends the Bearer header
+    and no `token` query parameter; every YouTube call sends
+    `X-goog-api-key` and no `key` query parameter; both Apify actor starts carry
+    `timeout`, `maxItems`, and `maxTotalChargeUsd`; every HTTP call receives the
+    configured per-request timeout; the poll loop uses a mocked monotonic
+    clock/sleep and cannot exceed its wall-clock budget; and start, poll, and
+    fetch non-2xx/transport failures plus every transitional/terminal run state
+    map without raising. No retained test performs a real provider call.
+16. **Platform provenance and rendering:** merged Apify results retain distinct
+    controlled `_outpost_platform` values through persistence, evidence, and
+    the campaign-detail view; Instagram, TikTok, YouTube, and creator-seed rows
+    each render the expected platform label while `target.source` remains
+    `apify`, `youtube`, or `seed` as appropriate.
 
-### 7.2 Live error-shape verification (deletable script, §14.1 pattern)
+### 7.2 Safe live verification (deletable script, §14.1 pattern)
 
-A temporary, DB-write-free script confirms the §5.4 Apify and YouTube
-status mappings against the real APIs before the mapping is relied upon, then
-is deleted (collaboration.md rule 11 — not converted to a maintained test,
-since it requires live keys). Until it runs, §5.4 stays marked as assumptions.
+A temporary, DB-write-free script may live-check only safely reproducible
+cases: an obviously invalid synthetic credential and, when the owner has
+provided a workspace key and authorized its use, one bounded happy-path call.
+It must never intentionally exhaust quota, provoke rate limiting, consume an
+account's remaining credit, manufacture an insufficient-plan/billing failure,
+or force a paid actor failure. Invalid-key checks use only synthetic values;
+owner keys are consumed in-process via `db.get_settings()` and are never read,
+printed, copied into the script, or placed in a URL.
+
+All other §5.4 mappings must be established by current official documentation
+and the mocked retained tests in §7.1. A naturally occurring live failure may be
+recorded as an observed case only after its detail is sanitized; it must not be
+induced. The temporary script is deleted after the safe checks
+(`collaboration.md` rule 11). Any mapping not safely observed remains labelled
+an assumption in code and `PROGRESS.md`; implementation does not wait for an
+unsafe reproduction.
 
 ### 7.3 Live happy-path (only if the owner provides keys)
 
@@ -563,20 +606,24 @@ Modified: `app/sources/__init__.py`, `app/sources/base.py`
 `collaboration.md`. No `requirements.txt` change (`httpx` already present). No
 schema migration.
 
-**This commit** touches only `docs/plans/SLICE_5_PLAN.md`, `collaboration.md`,
-and `docs/history/COLLABORATION_LOG.md`.
+**This commit** touches only `docs/plans/SLICE_5_PLAN.md`, `PROGRESS.md`,
+`collaboration.md`, and `docs/history/COLLABORATION_LOG.md`.
 
 ---
 
 ## 9. Remaining assumptions requiring live verification
 
-- Apify and YouTube HTTP-status → typed-status mappings, including the Apify
-  run-lifecycle terminal states (§5.4), are assumptions until the §7.2 script
-  confirms them live (only Apollo's were confirmed in Slice 2). The header-auth
-  scheme (Bearer for Apify, `X-goog-api-key` for YouTube) and the run-bounding
-  parameters (`timeout`, `maxItems`, `maxTotalChargeUsd`) are confirmed against
-  official docs (§4.0, §4.4); their exact runtime behavior under error is part
-  of what §7.2 verifies.
+- Apify and YouTube HTTP-status → typed-status mappings, including Apify
+  run-lifecycle terminal states (§5.4), must be grounded during implementation
+  in official documentation and mocked retained tests. §7.2 may live-observe
+  only a synthetic invalid-key case and owner-authorized bounded happy paths;
+  rate-limit, quota, insufficient-plan/billing, and forced-run-failure mappings
+  must never be
+  deliberately reproduced. Naturally observed sanitized failures may be
+  recorded separately. Unobserved mappings remain explicit assumptions. The
+  header-auth schemes (Bearer for Apify, `X-goog-api-key` for YouTube) and the
+  run-bounding parameters (`timeout`, `maxItems`, `maxTotalChargeUsd`) are
+  confirmed against official docs (§4.0, §4.4).
 - Provider pricing (§4.3) and the YouTube quota model (§4.4) are current as of
   2026-07-31 and provider-controlled; re-verify before relying on a figure.
 - Exact Apify output field names (e.g. TikTok `fans` vs `followers`) and the

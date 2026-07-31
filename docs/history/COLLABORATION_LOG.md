@@ -1618,3 +1618,47 @@ or coding sessions. It complements, but does not replace:
   After approval and the model-switch checkpoint, implementation may begin on
   Sonnet, starting with the §7.2 live error-shape verification. Do not
   implement until then.
+## 2026-07-31 — Slice 5 implementation-readiness corrections by SDE 2 (planning only)
+
+- Contributor/environment: SDE 2 / Codex.
+- Slice: Slice 5 (creator sources and demo mode) — planning only.
+- Role: Implementation reviewer and plan corrector, after explicit owner
+  approval of the proposed corrections.
+- Implementation status: Not started.
+- Changes and corrections: Closed the remaining SDE 2 review findings. Replaced
+  the deprecated Apify `/v2/acts/` route with canonical `/v2/actors/`.
+  Restricted live verification to a synthetic invalid-key case and
+  owner-authorized bounded happy paths; explicitly prohibited intentionally
+  exhausting quota, provoking rate limits, manufacturing billing/plan
+  failures, consuming remaining credit, or forcing paid actor failures.
+  Required official documentation plus mocked retained tests for unsafe-to-
+  induce mappings and allowed naturally observed sanitized cases to be
+  recorded separately. Added retained-test requirements that pin header-only
+  authentication, absence of credential query parameters, per-run timeout/item/
+  charge caps, per-request timeouts, wall-clock polling, every run lifecycle
+  state, and start/poll/fetch failures. Defined controlled
+  `raw["_outpost_platform"]` provenance so Instagram/TikTok/YouTube/seed
+  identity survives the existing batch-level source write and reaches evidence
+  and the creator table without a schema migration. Updated `PROGRESS.md` so
+  active context truthfully says the corrected plan exists and implementation
+  remains unapproved and unstarted.
+- Files or areas affected: `docs/plans/SLICE_5_PLAN.md`, `PROGRESS.md`,
+  `collaboration.md`, and this history entry. No application code, retained
+  tests, seeds, templates, styles, schema, dependencies, or local database rows
+  were changed.
+- Verification: Full diff reviewed; `git diff --check` clean; stale/unsafe
+  wording scan found no matches; aggregate credential-pattern scan found zero
+  credential-shaped values; only Markdown documentation files changed; retained
+  Slice 0–4 suite passed 171/171 via `python -m unittest discover -s tests`.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening` based on
+  planning commit `66e607b`; application behavior remains the verified Slice 4
+  state with 171 retained tests passing.
+- Known limitations: Slice 5 provider HTTP/run-lifecycle mappings remain
+  explicit assumptions where they cannot be safely live-observed. Current
+  provider pricing and output shapes are provider-controlled and must be
+  rechecked during implementation without unsafe failure induction. A live
+  happy path still requires an owner-provided workspace key.
+- Next action: Owner reviews the fully corrected Slice 5 plan. Only after
+  explicit implementation approval and the model-switch checkpoint may Slice 5
+  implementation begin on Sonnet, starting with the safe checks permitted by
+  §7.2. Do not implement until then.
