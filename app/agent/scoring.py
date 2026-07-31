@@ -32,7 +32,12 @@ from enum import Enum
 from app import llm
 from app.models import Brief, FitAssessment, FitBatch, FitReason
 
-SYSTEM_PROMPT = (
+# Target-type-aware system prompt (SLICE_5_PLAN.md §6.3.1): a creator
+# campaign scored by the LLM must be told to score creators, not companies —
+# the business wording is preserved verbatim so business LLM behavior is
+# unchanged. Only the prompt text and the target_type it carries change; the
+# schema, grounding, and heuristic are shape-agnostic and untouched.
+SYSTEM_PROMPT_BUSINESS = (
     "You score how well each candidate company fits a business's outreach "
     "campaign, on a 0-100 scale. For every target, give at least one reason "
     "that cites a specific evidence field and its exact value from that "
@@ -40,6 +45,21 @@ SYSTEM_PROMPT = (
     "not present for that target, and never invent a field or value. "
     "Respond with a JSON object only."
 )
+
+SYSTEM_PROMPT_CREATOR = (
+    "You score how well each candidate creator fits a campaign's outreach "
+    "goals, on a 0-100 scale. For every target, give at least one reason "
+    "that cites a specific evidence field and its exact value from that "
+    "target's own evidence. Never cite a field that is missing, blank, or "
+    "not present for that target, and never invent a field or value. "
+    "Respond with a JSON object only."
+)
+
+_SYSTEM_PROMPTS = {"business": SYSTEM_PROMPT_BUSINESS, "creator": SYSTEM_PROMPT_CREATOR}
+
+
+def _system_prompt(target_type: str) -> str:
+    return _SYSTEM_PROMPTS[target_type]
 
 # Stopwords dropped during industry/niche tokenization. Domain words like
 # "distribution" or "logistics" are deliberately NOT included.
@@ -120,7 +140,7 @@ def score_batch(
 
     try:
         batch = llm.generate_structured(
-            FitBatch, SYSTEM_PROMPT, _build_prompt(brief, evidence_list), settings
+            FitBatch, _system_prompt(brief.target_type), _build_prompt(brief, evidence_list), settings
         )
     except llm.LLMError as exc:
         status = (
@@ -148,13 +168,15 @@ def _build_prompt(brief: Brief, evidence_list: list[dict]) -> str:
         [{"target_index": i, "evidence": ev} for i, ev in enumerate(evidence_list)],
         indent=2,
     )
+    target_label = "creator" if brief.target_type == "creator" else "company"
     return (
         "Brief:\n"
+        f"- target_type: {brief.target_type}\n"
         f"- product: {brief.product}\n"
         f"- audience: {brief.audience}\n"
         f"- niche_or_industry: {brief.niche_or_industry}\n"
         f"- target_countries: {', '.join(brief.target_countries)}\n\n"
-        "Score every target below (by its target_index) for fit with this brief.\n"
+        f"Score every {target_label} target below (by its target_index) for fit with this brief.\n"
         f"{targets_block}"
     )
 
@@ -303,6 +325,16 @@ def _heuristic_score(brief: Brief, evidence: dict) -> TargetScore:
 
 
 def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
+    """Target-type-aware dispatch (SLICE_5_PLAN.md §6.3.2). Business scoring
+    is byte-identical to before Slice 5 — the Slice 3 anchor-score tests
+    still pin it; creator scoring is new and additive, never touching the
+    business path."""
+    if brief.target_type == "creator":
+        return _heuristic_creator(brief, evidence)
+    return _heuristic_business(brief, evidence)
+
+
+def _heuristic_business(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
     """A pure function of the evidence: stable, testable, always grounded.
 
     Three additive components (industry overlap 0-60, size band 0-25, country
@@ -379,6 +411,90 @@ def _heuristic(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
         reasons.append(
             FitReason(
                 reason="No structured evidence fields (industry, size, or country) were available to score",
+                evidence_key="name",
+                evidence_value=name.strip(),
+            )
+        )
+
+    return min(100, max(0, total)), reasons
+
+
+# Inclusive follower bands for the creator audience-size component
+# (SLICE_5_PLAN.md §6.3.3) — chosen so an established but still reachable
+# micro/mid creator scores highest, and a tiny or out-of-reach mega account
+# scores lowest. Boundaries: 999->5, 1,000->15, 9,999->15, 10,000->25,
+# 500,000->25, 500,001->15, 2,000,000->15, 2,000,001->5.
+_STRONG_FOLLOWER_RANGE = (10_000, 500_000)
+_MODERATE_FOLLOWER_RANGES = ((1_000, 9_999), (500_001, 2_000_000))
+
+
+def _heuristic_creator(brief: Brief, evidence: dict) -> tuple[int, list[FitReason]]:
+    """The creator counterpart to _heuristic_business (SLICE_5_PLAN.md §6.3.2):
+    three additive components (niche/bio overlap 0-60, follower band 0-25,
+    country match 0-15), with the exact same "no field, no reason; field
+    present, always one reason" discipline, and the same name-only final
+    fallback. Instagram/TikTok profiles commonly carry no country field, so
+    a creator scored without one has a practical ceiling of 85 (60 + 25),
+    not 100 — expected and honest, never fabricated.
+    """
+    total = 0
+    reasons: list[FitReason] = []
+
+    niche = evidence.get("niche")
+    if niche:
+        niche_tokens = _significant_niche_tokens(brief.niche_or_industry)
+        overlap = len(niche_tokens & _stemmed_tokens(niche))
+        points = round(60 * overlap / max(1, len(niche_tokens)))
+        total += points
+        reason_text = (
+            f"Interests overlap with the brief's niche ({overlap} matching term(s))"
+            if overlap
+            else "Interests don't match the brief's niche"
+        )
+        reasons.append(FitReason(reason=reason_text, evidence_key="niche", evidence_value=str(niche)))
+
+    followers = evidence.get("followers")
+    if isinstance(followers, bool):
+        followers = None  # bool is an int subclass in Python; not a real count
+    elif not isinstance(followers, int):
+        followers = None  # any other unexpected type (e.g. a string) is unusable, not a crash
+    if followers is not None:
+        lo, hi = _STRONG_FOLLOWER_RANGE
+        if lo <= followers <= hi:
+            points = 25
+            reason_text = f"Audience size ({followers} followers) is a strong fit for creator outreach"
+        elif any(lo <= followers <= hi for lo, hi in _MODERATE_FOLLOWER_RANGES):
+            points = 15
+            reason_text = f"Audience size ({followers} followers) is a moderate fit"
+        else:
+            points = 5
+            reason_text = f"Audience size ({followers} followers) is outside the ideal range"
+        total += points
+        reasons.append(FitReason(reason=reason_text, evidence_key="followers", evidence_value=str(followers)))
+
+    country = evidence.get("country")
+    if country:
+        if country in brief.target_countries:
+            points = 15
+            reason_text = f"Located in a targeted country ({country})"
+        else:
+            points = 0
+            reason_text = f"Not located in a targeted country ({country})"
+        total += points
+        reasons.append(FitReason(reason=reason_text, evidence_key="country", evidence_value=str(country)))
+
+    if not reasons:
+        # Mirrors _heuristic_business's final fallback: cite the one field
+        # every creator source's normalize_evidence() is contractually
+        # required to leave nonblank (name), never a fabricated placeholder.
+        name = evidence.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise UngroundedEvidenceError(
+                "evidence has no niche/followers/country and no usable name to cite"
+            )
+        reasons.append(
+            FitReason(
+                reason="No structured evidence fields (niche, followers, or country) were available to score",
                 evidence_key="name",
                 evidence_value=name.strip(),
             )

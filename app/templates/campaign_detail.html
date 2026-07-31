@@ -29,10 +29,17 @@
     <table class="table">
       <thead>
         <tr>
+          {% if campaign.target_type == "creator" %}
+          <th>Creator</th>
+          <th>Handle</th>
+          <th>Platform</th>
+          <th class="table__num">Followers</th>
+          {% else %}
           <th>Company</th>
           <th>Domain</th>
           <th>Country</th>
           <th class="table__num">Size</th>
+          {% endif %}
           <th class="table__num">Fit</th>
           <th>Source</th>
           <th>Draft</th>
@@ -43,7 +50,11 @@
         <tr>
           <td>{{ t.name }}</td>
           <td>{{ t.handle_or_domain or "—" }}</td>
+          {% if campaign.target_type == "creator" %}
+          <td>{{ t.platform or "—" }}</td>
+          {% else %}
           <td>{{ t.country or "—" }}</td>
+          {% endif %}
           <td class="table__num mono">{{ t.reach if t.reach is not none else "—" }}</td>
           <td class="table__num mono {{ t.fit_class or "" }}">
             {% if t.fit_score is not none %}

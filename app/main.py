@@ -239,7 +239,13 @@ def create_campaign(
     discovery_result = sources.discover(intake_result.brief, settings)
 
     # 5. Write the discovery audit row with workspace_id and campaign_id.
-    discovery_action, _, _ = audit_banners.DISCOVERY_MAP[discovery_result.status]
+    # Business vs creator maps are selected by source_attempted, not
+    # target_type, so an "apollo" attempt always maps through DISCOVERY_MAP
+    # and an "apify"/"youtube" attempt always maps through
+    # CREATOR_DISCOVERY_MAP (SLICE_5_PLAN.md §6.4).
+    discovery_action, _, _ = audit_banners.discovery_action_for(
+        discovery_result.source_attempted, discovery_result.status
+    )
     db.add_audit(workspace_id, campaign_id, "agent", discovery_action, detail=discovery_result.reason)
 
     # 6. Zero-target branch: nothing to score or persist. A neutral audit
@@ -251,7 +257,8 @@ def create_campaign(
     # 7. Build normalized, source-neutral evidence for every candidate
     # through the Source.evidence() boundary (never provider-specific keys).
     evidence_list = [
-        sources.evidence_for(discovery_result.source_used, c) for c in discovery_result.candidates
+        sources.evidence_for(discovery_result.source_used, target_type, c)
+        for c in discovery_result.candidates
     ]
 
     # 8. Score the whole batch in one LLM call (bounded latency; a rejected
@@ -302,6 +309,17 @@ def _fit_class(fit_score: int | None) -> str | None:
     return "fit--low"
 
 
+# Display labels for the controlled _outpost_platform provenance marker
+# (SLICE_5_PLAN.md §6.1) — every creator source (YouTube, Apify's Instagram/
+# TikTok actors, creator seed) sets one of these three values, never a raw
+# provider field, so this map can never see anything else.
+_PLATFORM_LABELS = {"youtube": "YouTube", "instagram": "Instagram", "tiktok": "TikTok"}
+
+
+def _platform_label(raw: dict) -> str | None:
+    return _PLATFORM_LABELS.get(raw.get("_outpost_platform"))
+
+
 @app.get("/campaigns/{campaign_id}")
 def campaign_detail(
     campaign_id: int,
@@ -317,10 +335,13 @@ def campaign_detail(
         return RedirectResponse("/campaigns", status_code=303)
 
     brief = json.loads(campaign["brief_json"])
-    # The table shows only the country portion of each target's location
-    # (design.md's Company/Domain/Country/Size/Source columns); the raw
-    # source payload already carries a "country" field for both Apollo and
-    # seed candidates.
+    # The business table shows only the country portion of each target's
+    # location (design.md's Company/Domain/Country/Size/Source columns); the
+    # raw source payload already carries a "country" field for both Apollo
+    # and seed candidates. The creator table instead shows platform
+    # (SLICE_5_PLAN.md §6.1's controlled _outpost_platform marker survives
+    # persistence in raw_json regardless of target.source, so Instagram/
+    # TikTok stay distinguishable even though both share source="apify").
     targets = []
     for t in db.list_targets(workspace_id, campaign_id):
         raw = json.loads(t["raw_json"]) if t["raw_json"] else {}
@@ -330,6 +351,7 @@ def campaign_detail(
             {
                 **dict(t),
                 "country": raw.get("country"),
+                "platform": _platform_label(raw),
                 "fit_reasons": fit_reasons,
                 "fit_class": _fit_class(t["fit_score"]),
                 "cta": _draft_cta(t["id"], latest_draft),

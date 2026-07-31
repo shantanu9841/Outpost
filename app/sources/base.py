@@ -23,6 +23,8 @@ class SourceStatus(str, Enum):
     PROVIDER_ERROR = "provider_error"    # provider-side failure (5xx/422/unexpected) — not a key problem
     NETWORK_ERROR = "network_error"      # could not reach the provider at all
     SEED_ERROR = "seed_error"            # the local seed fallback itself could not load
+    PARTIAL_RESULTS = "partial_results"  # multi-actor source: >=1 sub-source succeeded,
+                                          # >=1 failed; candidates exist (Slice 5, ApifySource)
 
 
 def coerce_int(value: object) -> int | None:

@@ -1662,3 +1662,139 @@ or coding sessions. It complements, but does not replace:
   explicit implementation approval and the model-switch checkpoint may Slice 5
   implementation begin on Sonnet, starting with the safe checks permitted by
   §7.2. Do not implement until then.
+
+## 2026-07-31 — Slice 5 implemented: creator sources and demo mode
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 5 (creator sources and demo mode) — full implementation
+- Role: Implementer
+- Implementation status: Complete
+- Changes and corrections: Implemented `docs/plans/completed/SLICE_5_PLAN.md`
+  end to end on Sonnet, with no material deviation from the owner-approved
+  plan. New: `app/sources/youtube.py` (search.list + one batched
+  channels.list, `X-goog-api-key` header auth, strict per-request timeout,
+  never raises); `app/sources/apify.py` (`ApifySource` running the Instagram
+  and TikTok actors via start-run -> bounded-poll -> fetch, `Authorization:
+  Bearer` header auth, named `RUN_TIMEOUT_SECS`/`MAX_ITEMS`/
+  `MAX_TOTAL_CHARGE_USD`/`REQUEST_TIMEOUT_SECS`/`POLL_INTERVAL_SECS`/
+  `POLL_BUDGET_SECS` constants, an injectable sleep/monotonic clock so tests
+  can drive the poll loop without a real wait, merge-with-precedence per
+  §5.3); `seeds/creators.json` (five-row strong/partial/geographic-
+  mismatch/weak/irrelevant spread, engineered against a "wellness fitness
+  mindfulness" brief to score 100/80/65/40/5 — confirmed live); and
+  `tests/test_slice5_creators.py` (35 new retained tests, one per §7.1
+  acceptance criterion group). Modified: `app/sources/base.py`
+  (`SourceStatus.PARTIAL_RESULTS`); `app/sources/seed.py`
+  (`SeedSource("creator")` reads `creators.json` with no country
+  pre-filter — unlike business — so the geographic-mismatch row
+  reaches scoring instead of being discovery-filtered away; new
+  `normalize_creator_evidence`, `_to_creator_candidate`); `app/sources/
+  __init__.py` (`_discover_creator`'s Apify-then-YouTube-then-seed priority
+  routing, `_fallback_to_creator_seed`, and `evidence_for(source_used,
+  target_type, candidate)` now dispatching seed's business/creator
+  normalizers by `target_type`); `app/agent/scoring.py`
+  (`SYSTEM_PROMPT_BUSINESS`/`SYSTEM_PROMPT_CREATOR` selected by
+  `_system_prompt(target_type)`, `_build_prompt` now carries `target_type`
+  and labels rows "creator"/"company", `_heuristic` dispatches to the
+  renamed `_heuristic_business` — byte-identical logic — or the new
+  `_heuristic_creator` with the exact §6.3.3 follower bands);
+  `app/audit_banners.py` (`CREATOR_DISCOVERY_MAP`,
+  `CREATOR_DISCOVERY_OK_ACTIONS`, and a `discovery_action_for(source_attempted,
+  status)` dispatcher — one addition beyond the plan's literal §6.4
+  text: a creator `OK` needs the source-specific silent action
+  (`discovery.apify_ok` vs `discovery.youtube_ok`), which a map keyed only by
+  `SourceStatus` cannot express, so dispatch is by `source_attempted` first
+  and then, only for `OK`, by which source actually succeeded); `app/main.py`
+  (wires the new dispatcher into `create_campaign`, adds `_platform_label`
+  and `target["platform"]` to `campaign_detail`, and updates the
+  `evidence_for` call site for the new `target_type` parameter); three
+  templates (`campaign_new.html` enables the creator radio;
+  `campaign_detail.html` renders a target-type-aware table — Creator/
+  Handle/Platform/Followers vs Company/Domain/Country/Size; `settings.html`
+  corrects the YouTube hint to state a workspace key is required for live
+  discovery, no keyless language). One incidental fix to a pre-existing
+  Slice 3 test's implicit assumption: `discovery_action_for` treats any
+  `source_attempted` other than `"apify"`/`"youtube"` as business (not only
+  `"apollo"` specifically), which keeps
+  `test_slice3_scoring.AssertGroundedRouteTests` (a mock using the
+  synthetic, non-production `source_attempted="seed"`) passing without
+  modifying that retained test file.
+- Files or areas affected: All files listed in SLICE_5_PLAN.md §8 (new
+  and modified), plus this entry, `PROGRESS.md`, `DECISIONS.md`, and
+  `collaboration.md`. `docs/plans/SLICE_5_PLAN.md` moved to
+  `docs/plans/completed/SLICE_5_PLAN.md` per the established convention (no
+  content change). No `requirements.txt` change and no schema migration, as
+  the plan specified.
+- Verification: §7.2's safe live check ran first, via a temporary
+  DB-write-free script (`scripts/verify_slice5_error_shapes.py`, deleted
+  immediately after per collaboration.md rule 11) hitting the real Apify and
+  YouTube APIs with synthetic, obviously-fake credentials only: Apify
+  start-run with a bogus Bearer token returned `401`/
+  `user-or-token-not-found`; YouTube `search.list` with a bogus
+  `X-goog-api-key` header returned `400`/`INVALID_ARGUMENT`/"API key not
+  valid. Please pass a valid API key." — both confirming the plan's
+  `INVALID_KEY` mapping and the header-only auth transport (no
+  credential-bearing URL) before any application code was written. No owner
+  `youtube`/`apify` key was available or authorized this session, so §7.2's
+  owner-authorized bounded happy-path leg was not run. Ran the full retained
+  suite after every implementation step: 206/206 tests pass
+  (`python -m unittest discover -s tests`) — 171 pre-existing tests
+  unchanged plus 35 new tests covering every §7.1 acceptance criterion
+  (Apify full/partial/dual-failure and status precedence; YouTube-vs-Apify
+  routing priority; zero-key seed fallback with the `discovery.no_creator_key`
+  banner; the creator seed spread's ranking discrimination with every
+  reason grounded; all eight follower-boundary pairs plus missing/
+  non-integer-followers and the country-absent 85-point ceiling; the
+  target-type-aware LLM prompt/system-text; a re-pinned business anchor
+  score, Cornerstone Wellness Distributors -> 90, reached through the same
+  public `_heuristic()` dispatcher creator scoring now shares; the business/
+  creator discovery action-key non-collision; tenant isolation of creator
+  targets/audit rows; sanitized-reason redaction of an injected fake key;
+  Apify/YouTube transport assertions — Bearer/`X-goog-api-key` headers,
+  no credential query params, `timeout`/`maxItems`/`maxTotalChargeUsd` on
+  every actor start, per-request timeouts, a mocked poll clock proving the
+  wall-clock budget is honored, and every start/poll/fetch failure plus
+  every terminal run state mapping without raising; and platform provenance
+  surviving persistence into `campaign_detail`'s rendered table). Also ran a
+  live browser session against the real app and the real `outpost.db` (a new
+  workspace, "Slice 5 Verify", id 8, created and left in place as normal
+  product usage, matching prior slices' verification precedent): confirmed
+  the creator radio is enabled on `/campaigns/new`; submitted a zero-key
+  creator campaign and confirmed the resulting `/campaigns/{id}` page shows
+  the target-type-aware Creator/Handle/Platform/Followers columns, all three
+  platform labels (YouTube, Instagram, TikTok) rendering correctly for the
+  five creator-seed rows, the `discovery.no_creator_key` info banner text,
+  and differentiated (non-uniform) fit scores; confirmed `/settings` shows
+  the corrected YouTube hint; confirmed the full draft -> approve -> pipeline
+  stage-change flow completes for a creator target through the real routes
+  (matching the mocked integration test). Confirmed via `getComputedStyle`
+  in both themes that no new CSS token was needed — every new element
+  reuses existing classes (`.table`, `.badge`, `.banner--info`) — and
+  that dark (`bg` `#09090B`, `text` `#FAFAFA`, `bg-subtle` `#131316`) and
+  light (`bg` `#FAFAFA`, `text` `#18181B`, `bg-subtle` `#F4F4F5`,
+  `.banner--info` background `#DBEAFE`) all resolve to design.md's exact
+  token values. Screenshots were unavailable in this session's headless
+  browser pane (same limitation noted in the Slice 2 entry); computed-style
+  verification substituted, per collaboration.md rule 10's stated
+  preference. No `outpost.db` rows were deleted or reset; the only local
+  state change was the new "Slice 5 Verify" workspace and its one campaign,
+  created as normal product usage.
+- Known limitations: No live Apify or YouTube creator discovery run has been
+  performed — both require an owner-provided workspace key, and none was
+  authorized this session. Every §5.4 HTTP-status mapping beyond the
+  confirmed `INVALID_KEY` case (insufficient-plan, rate-limit,
+  provider-error, and every Apify run-lifecycle terminal state) remains an
+  explicit assumption grounded in official documentation and mocked tests
+  only, per the plan's own §9 — SLICE_5_PLAN.md explicitly forbids
+  deliberately reproducing quota/rate-limit/billing/plan failures to close
+  this gap live. Apify/TikTok's exact output field names (`fans` vs
+  `followers`, `nickname` vs `nickName`) are taken from the actor's
+  documented schema and tolerated defensively (a missing field becomes
+  `None`, never a crash) but are unconfirmed against a real dataset item.
+  The creator follower bands are a demo-mode heuristic choice, not a
+  calibrated model, as the plan itself states.
+- Next action: Commit this work (application code, seeds, tests, and
+  documentation together). Then Slice 6 (evaluation and cost-aware
+  routing) per SPEC.md §6 — model recommendation and a plan-mode
+  confirmation against SPEC.md are still owed to the owner before that
+  slice's implementation begins.

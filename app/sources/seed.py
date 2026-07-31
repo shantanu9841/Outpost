@@ -16,13 +16,13 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from app.models import Brief, Candidate
-from app.sources.base import Source, SourceResult, SourceStatus, coerce_int
+from app.sources.base import Source, SourceResult, SourceStatus, canonical_name, coerce_int
 
 SEEDS_DIR = Path(__file__).resolve().parent.parent.parent / "seeds"
 
 
 def normalize_evidence(raw: dict) -> dict:
-    """Map a seed company row to the source-neutral evidence shape.
+    """Map a seed company row to the source-neutral business evidence shape.
 
     Fit-scoring (app/agent/scoring.py) reads only this shape, never a seed
     row's own field names — so evidence reads identically regardless of
@@ -37,6 +37,22 @@ def normalize_evidence(raw: dict) -> dict:
     }
 
 
+def normalize_creator_evidence(raw: dict) -> dict:
+    """Map a seed creator row to the source-neutral creator evidence shape
+    (SLICE_5_PLAN.md §6.1) — the same shape YouTubeSource/ApifySource
+    produce, so scoring's creator heuristic reads identically regardless of
+    which source produced the target.
+    """
+    return {
+        "name": canonical_name(raw.get("name")),
+        "niche": raw.get("niche"),
+        "followers": coerce_int(raw.get("followers")),
+        "country": raw.get("country"),
+        "handle": raw.get("handle"),
+        "platform": raw.get("_outpost_platform"),
+    }
+
+
 class SeedSource(Source):
     name = "seed"
 
@@ -44,10 +60,11 @@ class SeedSource(Source):
         self.kind = kind  # "business" or "creator"
 
     def search(self, brief: Brief) -> SourceResult:
-        if self.kind != "business":
-            # Creator seed data arrives in Slice 5; nothing to read yet.
-            return self._result([], SourceStatus.OK, None)
+        if self.kind == "creator":
+            return self._search_creators()
+        return self._search_businesses(brief)
 
+    def _search_businesses(self, brief: Brief) -> SourceResult:
         try:
             raw_text = (SEEDS_DIR / "companies.json").read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
@@ -86,10 +103,50 @@ class SeedSource(Source):
                 )
         return self._result(candidates, SourceStatus.OK, None)
 
+    def _search_creators(self) -> SourceResult:
+        # Unlike business seed, creator seed is never pre-filtered by
+        # target_countries: SLICE_5_PLAN.md §7.4's geographic-mismatch row
+        # must reach scoring so the heuristic's country component can score
+        # it low with a truthful reason — filtering it out at discovery
+        # would hide the exact discrimination the seed spread exists to
+        # demonstrate.
+        try:
+            raw_text = (SEEDS_DIR / "creators.json").read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return self._result(
+                [], SourceStatus.SEED_ERROR, f"could not read seed data ({type(exc).__name__})"
+            )
+
+        try:
+            creators = json.loads(raw_text)
+        except json.JSONDecodeError:
+            return self._result([], SourceStatus.SEED_ERROR, "seed data was not valid JSON")
+
+        if not isinstance(creators, list):
+            return self._result(
+                [], SourceStatus.SEED_ERROR, "seed data was not a list of creators"
+            )
+
+        candidates = []
+        for creator in creators:
+            if not isinstance(creator, dict):
+                return self._result(
+                    [], SourceStatus.SEED_ERROR, "seed data contained a malformed row"
+                )
+            try:
+                candidates.append(self._to_creator_candidate(creator))
+            except (KeyError, TypeError, ValueError, ValidationError):
+                return self._result(
+                    [], SourceStatus.SEED_ERROR, "seed data contained a malformed creator row"
+                )
+        return self._result(candidates, SourceStatus.OK, None)
+
     def _result(self, candidates, status, reason) -> SourceResult:
         return SourceResult(candidates, status, "seed", "seed", reason)
 
     def evidence(self, candidate: Candidate) -> dict:
+        if self.kind == "creator":
+            return normalize_creator_evidence(candidate.raw)
         return normalize_evidence(candidate.raw)
 
     @staticmethod
@@ -118,4 +175,36 @@ class SeedSource(Source):
             reach=company.get("employees"),
             location=location,
             raw=company,
+        )
+
+    _CREATOR_PLATFORMS = ("youtube", "instagram", "tiktok")
+
+    @classmethod
+    def _to_creator_candidate(cls, creator: dict) -> Candidate:
+        # Same discipline as _to_candidate: seeds/creators.json is curated by
+        # us, so a blank name or an unrecognized platform is a real
+        # data-quality bug in that file, not messy external input — reject
+        # it through SEED_ERROR rather than guessing a fallback.
+        name = creator["name"]  # missing key -> KeyError -> SEED_ERROR
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("seed creator row had a blank name")
+
+        platform = creator.get("platform")
+        if platform not in cls._CREATOR_PLATFORMS:
+            raise ValueError("seed creator row had an unrecognized platform")
+
+        # Controlled provenance marker (SLICE_5_PLAN.md §6.1), set from the
+        # row's own validated platform value — never left for a live
+        # provider's raw field to set, the same rule YouTubeSource/
+        # ApifySource follow for their own candidates.
+        raw = {**creator, "_outpost_platform": platform}
+
+        return Candidate(
+            source="seed",
+            external_id=None,
+            name=name,
+            handle_or_domain=creator.get("handle"),
+            reach=coerce_int(creator.get("followers")),
+            location=creator.get("country"),
+            raw=raw,
         )

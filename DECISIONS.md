@@ -18,7 +18,7 @@ When changing an active decision, stop for owner approval, update this index and
 | Domain-neutral public build | Keep the repository reusable; client-specific data and credentials remain local workspace data. |
 | Source-agnostic discovery | Provider modules implement the shared Source interface; routes and downstream agents do not depend on provider-specific payloads. |
 | Apollo for B2B | Use Apollo's organization search for business targets, never LinkedIn scraping. |
-| Maintained API for creator data | Prefer a maintained paid provider such as an Apify actor over a self-hosted social scraper; Slice 5 must verify the current actor and pricing before choosing. |
+| Maintained API for creator data | Instagram and TikTok discovery use maintained Apify actors (`apify/instagram-scraper`, `clockworks/tiktok-scraper`), never a self-hosted scraper; YouTube's free Data API v3 is the free creator source. Actor ids and pricing were confirmed against official Apify/Google documentation on 2026-07-31 and are provider-controlled — re-verify before relying on a pricing figure. |
 | BYO-key and free/demo paths | The owner supplies workspace-scoped credentials. The builder incurs no provider cost, and zero-key workflows remain usable. |
 | Cost-aware routing | Slice 6 will route work using measured quality/cost signals; `draft.cost_tokens` is already reserved for this. |
 | Human approval before send | Drafting and approval are separate. Nothing transmits automatically; every human/agent action is audited. |
@@ -48,6 +48,15 @@ When changing an active decision, stop for owner approval, update this index and
 | Shared HTTP client dependency | `httpx` is the approved external HTTP dependency. `python-multipart` supports form handling; the retained test suite uses the standard-library `unittest`. |
 | Evidence normalization boundary | Each provider maps raw data to the canonical evidence shape before scoring. Scoring never reads provider-specific raw fields. |
 | Canonical nonblank name | Provider candidate identity and normalized `name` evidence use the same canonicalization; malformed curated seed names fail rather than silently diverge. |
+| Creator routing is deterministic priority, not aggregation | Creator discovery selects exactly one live source: Apify when configured, else YouTube when configured, else creator seed. Apify and YouTube are never combined in one campaign. |
+| `PARTIAL_RESULTS` is a success, not a fallback trigger | Apify's dual-actor merge can succeed on one platform and fail on the other; `discover()` keeps those candidates (with a warning naming the failed platform) rather than discarding them for seed data. |
+| Apify precedence on dual sub-source failure | When Instagram and TikTok fail with different statuses, the reported status follows `INVALID_KEY > INSUFFICIENT_PLAN > RATE_LIMITED > PROVIDER_ERROR > NETWORK_ERROR`; the combined reason always names both platforms. |
+| Header-only provider authentication | Apify (`Authorization: Bearer`) and YouTube (`X-goog-api-key`) send credentials only as request headers, never as URL query parameters, so no request URL is ever credential-bearing. |
+| Apify start-run + bounded polling, never `run-sync` | Every Apify run is started, polled at a fixed interval up to a wall-clock budget, then fetched — each step under its own per-request timeout, plus named `timeout`/`maxItems`/`maxTotalChargeUsd` caps on the run itself. |
+| `evidence_for` dispatches seed by `target_type` | Seed data serves both business and creator rows under `source_used == "seed"`; the registry entry for `"seed"` is itself keyed by `target_type` so the two evidence shapes cannot collide. |
+| Controlled `_outpost_platform` provenance | Every creator source sets this marker on `Candidate.raw` from its own constant, never from an untrusted provider field. `target.source` stays the source-level value; the marker alone carries Instagram/TikTok/YouTube identity through persistence to the UI. |
+| YouTube requires a workspace key for live discovery | There is no keyless live YouTube search and no `YOUTUBE_API_KEY` env fallback; without a workspace key, creator discovery uses seed data. |
+| Namespaced creator discovery audit actions | Creator discovery actions (`discovery.apify_ok`, `discovery.youtube_ok`, `discovery.apify_partial`, `discovery.no_creator_key`, `discovery.creator_*`) share no key with the business `DISCOVERY_MAP`; `main.py` selects the map by `source_attempted`. |
 
 ## Intake and scoring
 
@@ -62,6 +71,8 @@ When changing an active decision, stop for owner approval, update this index and
 | Terminal credential reuse | If intake already learned the Gemini key is rejected, scoring skips its own redundant provider call. |
 | Defensive numeric evidence | Employee counts are coerced at normalization; NaN, infinity, non-integral floats, and malformed values become unavailable rather than raising or truncating. |
 | Industry heuristic normalization | Industry comparison uses the retained minimal stemming and short-token exclusion behavior; anchor scores are protected by tests. |
+| Target-type-aware LLM prompt and heuristic | Both the Gemini system prompt/`_build_prompt` and the deterministic heuristic branch on `brief.target_type`; the business path (prompt wording, heuristic components, anchor scores) is unchanged, and a new creator path (niche 0–60, followers 0–25, country 0–15) is additive only. |
+| Creator follower bands are an explicit, tested table | 10,000–500,000 followers scores 25 (strong fit); 1,000–9,999 or 500,001–2,000,000 scores 15 (moderate); under 1,000 or over 2,000,000 scores 5; missing/non-integer scores 0 with no reason. A creator scored without a country field (common for Instagram/TikTok) has a practical ceiling of 85, not 100 — expected, never fabricated. |
 
 ## Drafting, approval, and pipeline
 

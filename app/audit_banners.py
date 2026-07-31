@@ -51,6 +51,83 @@ DISCOVERY_MAP: dict[SourceStatus, tuple[str, str | None, str | None]] = {
     ),
 }
 
+CREATOR_DISCOVERY_OK_ACTIONS: dict[str, str] = {
+    # Which source actually succeeded determines the (silent) action name —
+    # DISCOVERY_MAP's single "discovery.apollo_ok" doesn't generalize here
+    # because a creator campaign can succeed via either live source.
+    "apify": "discovery.apify_ok",
+    "youtube": "discovery.youtube_ok",
+}
+
+CREATOR_DISCOVERY_MAP: dict[SourceStatus, tuple[str, str | None, str | None]] = {
+    # status: (audit_action, banner_severity, banner_template). Every key
+    # here is namespaced discovery.creator_*/apify_*/youtube_*/no_creator_key
+    # (correction 6) so it can never collide with a DISCOVERY_MAP (business)
+    # action — a business seed-load failure keeps discovery.seed_error,
+    # never discovery.creator_seed_error, and vice versa.
+    SourceStatus.PARTIAL_RESULTS: (
+        "discovery.apify_partial",
+        "warning",
+        "Apify returned results from only one platform ({reason}).",
+    ),
+    SourceStatus.NO_KEY: (
+        "discovery.no_creator_key",
+        "info",
+        "Using creator seed data (no Apify or YouTube key). Paste an Apify or YouTube key in Settings for live creator discovery.",
+    ),
+    SourceStatus.INVALID_KEY: (
+        "discovery.creator_invalid_key",
+        "warning",
+        "The creator source rejected the request ({reason}). Falling back to seed data — check your Apify or YouTube key in Settings.",
+    ),
+    SourceStatus.INSUFFICIENT_PLAN: (
+        "discovery.creator_insufficient_plan",
+        "warning",
+        "The creator source rejected the request ({reason}). Falling back to seed data — your plan doesn't include this search.",
+    ),
+    SourceStatus.RATE_LIMITED: (
+        "discovery.creator_rate_limited",
+        "warning",
+        "The creator source is rate-limiting requests right now ({reason}). Falling back to seed data — try again in a little while; your key is fine.",
+    ),
+    SourceStatus.PROVIDER_ERROR: (
+        "discovery.creator_provider_error",
+        "warning",
+        "The creator source couldn't complete the search ({reason}). Falling back to seed data — this is a problem on the provider's side, not your key.",
+    ),
+    SourceStatus.NETWORK_ERROR: (
+        "discovery.creator_network_error",
+        "warning",
+        "Couldn't reach the creator source ({reason}). Falling back to seed data — check your connection and try again.",
+    ),
+    SourceStatus.SEED_ERROR: (
+        "discovery.creator_seed_error",
+        "warning",
+        "Creator discovery couldn't load any targets ({reason}). No results to show — this is a local data problem, not your key.",
+    ),
+}
+
+
+_CREATOR_SOURCES = frozenset({"apify", "youtube"})
+
+
+def discovery_action_for(source_attempted: str, status: SourceStatus) -> tuple[str, str | None, str | None]:
+    """The (action, severity, template) entry for a discovery outcome.
+
+    Dispatches business vs creator by source_attempted (SLICE_5_PLAN.md
+    §6.4): "apify"/"youtube" are always creator; everything else (in
+    practice always "apollo") is business. A creator OK needs the
+    source-specific silent action (discovery.apify_ok vs
+    discovery.youtube_ok) that CREATOR_DISCOVERY_MAP alone can't express,
+    since it's keyed only by status.
+    """
+    if source_attempted not in _CREATOR_SOURCES:
+        return DISCOVERY_MAP[status]
+    if status == SourceStatus.OK:
+        return CREATOR_DISCOVERY_OK_ACTIONS[source_attempted], None, None
+    return CREATOR_DISCOVERY_MAP[status]
+
+
 INTAKE_MAP: dict[IntakeStatus, tuple[str, str | None, str | None]] = {
     IntakeStatus.LLM_OK: ("intake.llm_ok", None, None),
     IntakeStatus.NO_GEMINI_KEY: (
@@ -96,7 +173,12 @@ SCORING_MAP: dict[ScoreStatus, tuple[str, str | None, str | None]] = {
 
 BANNER_BY_ACTION: dict[str, tuple[str, str]] = {
     action: (severity, template)
-    for action, severity, template in [*DISCOVERY_MAP.values(), *INTAKE_MAP.values(), *SCORING_MAP.values()]
+    for action, severity, template in [
+        *DISCOVERY_MAP.values(),
+        *CREATOR_DISCOVERY_MAP.values(),
+        *INTAKE_MAP.values(),
+        *SCORING_MAP.values(),
+    ]
     if severity is not None
 }
 
@@ -136,6 +218,16 @@ ACTION_LABELS: dict[str, str] = {
     "discovery.provider_error": "Discovery ran (seed data, Apollo error)",
     "discovery.network_error": "Discovery ran (seed data, network error)",
     "discovery.seed_error": "Discovery failed",
+    "discovery.apify_ok": "Discovery ran (Apify)",
+    "discovery.youtube_ok": "Discovery ran (YouTube)",
+    "discovery.apify_partial": "Discovery ran (Apify, partial results)",
+    "discovery.no_creator_key": "Discovery ran (creator seed data)",
+    "discovery.creator_invalid_key": "Discovery ran (creator seed data, key rejected)",
+    "discovery.creator_insufficient_plan": "Discovery ran (creator seed data, plan limit)",
+    "discovery.creator_rate_limited": "Discovery ran (creator seed data, rate-limited)",
+    "discovery.creator_provider_error": "Discovery ran (creator seed data, provider error)",
+    "discovery.creator_network_error": "Discovery ran (creator seed data, network error)",
+    "discovery.creator_seed_error": "Discovery failed",
     "scoring.llm_ok": "Targets scored",
     "scoring.partial_heuristic": "Targets scored (partially heuristic)",
     "scoring.no_gemini_key": "Targets scored (heuristic)",

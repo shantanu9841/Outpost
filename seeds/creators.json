@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Aria Wellness",
+    "handle": "@AriaWellness",
+    "niche": "Daily wellness, fitness, and mindfulness routines for busy professionals",
+    "followers": 120000,
+    "country": "United States",
+    "platform": "youtube"
+  },
+  {
+    "name": "FitLife Sam",
+    "handle": "@fitlifesam",
+    "niche": "Fitness workouts, gym gear reviews, and mindfulness breathing tips",
+    "followers": 45000,
+    "country": "United States",
+    "platform": "instagram"
+  },
+  {
+    "name": "Berlin Wellness Guide",
+    "handle": "@berlinwellnessguide",
+    "niche": "Wellness, fitness, and mindfulness content for a healthy lifestyle in Berlin",
+    "followers": 5000000,
+    "country": "Germany",
+    "platform": "tiktok"
+  },
+  {
+    "name": "New Journey Nina",
+    "handle": "@newjourneynina",
+    "niche": "Just started my fitness journey, sharing daily motivation",
+    "followers": 450,
+    "country": "United States",
+    "platform": "instagram"
+  },
+  {
+    "name": "Turbo Car Reviews",
+    "handle": "@turbocarreviews",
+    "niche": "Car reviews, racing highlights, and automotive news",
+    "followers": 800,
+    "country": "France",
+    "platform": "youtube"
+  }
+]
