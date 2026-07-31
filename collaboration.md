@@ -22,8 +22,8 @@ Read this at the start of every session for active ownership and handoff state. 
 
 ## Current handoff
 
-- **Owner-approved activity:** Documentation context optimization before Slice 5.
-- **Role:** SDE 2 / Codex desktop implemented the approved documentation-only plan.
+- **Owner-approved activity:** Documentation context optimization and its final integrity-review correction before Slice 5.
+- **Role:** SDE 2 / Codex desktop completed the approved documentation-only work.
 - **Branch:** `codex/sde-1-slice-2-hardening`.
 - **Baseline before this refactor:** `ba94834` (`Document workspace-scoped Gemini verification`), clean tree, 171 tests passing.
 - **Product state:** Slices 0–4 are complete. No Slice 5 plan or implementation exists.
@@ -31,10 +31,11 @@ Read this at the start of every session for active ownership and handoff state. 
 - **Provider state:** Live Gemini drafting succeeded with `gemini-3.6-flash` using the approved workspace-scoped setting. Apollo plan-limited fallback is verified. No credential is stored in tracked files.
 - **Known open work:** Slice 5 must research maintained Apify Instagram/TikTok actors and pricing and verify YouTube Data API search/quota before architecture is approved.
 - **Executable application work:** None. Only Markdown and plan-reference docstrings/comments changed.
-- **Next action:** Owner reviews the compact documentation result and token measurements. After approval, begin Slice 5 planning with the model checkpoint required by `CLAUDE.md`.
+- **Next action:** SDE 1 may begin Slice 5 planning after the owner gives the model checkpoint and planning instruction. Do not implement until the owner approves the plan.
 
 ## Recent activity
 
+- **Archive hash correction:** Corrected the `collaboration.md` baseline SHA-256 to the canonical Git-blob value after review identified a Windows CRLF working-copy mismatch; archived content was already intact.
 - **Documentation context optimization:** Preserved the full decision and collaboration records in `docs/history/`, moved completed plans to `docs/plans/completed/`, and replaced active documents with routed summaries. Application behavior is unchanged.
 - **Live Gemini closure:** A DB-write-free `draft_outreach` call returned `DraftStatus.LLM_OK` on `gemini-3.6-flash`; `CLAUDE.md` records the safe workspace-scoped verification procedure.
 - **Slice 4 approval correction:** Save → revert to original → approve now clears stale `edited_body`; the retained suite increased to 171 tests.

@@ -1427,8 +1427,8 @@ or coding sessions. It complements, but does not replace:
   disclosure rather than forcing every SDE session to ingest all history.
   Preserved the pre-refactor `collaboration.md` and `DECISIONS.md`
   byte-for-byte first as `docs/history/COLLABORATION_LOG.md`
-  (baseline SHA-256
-  `A314603925C122C34367AB68F065B9B4491215FF1D54BAF7FB127420447FA4B5`)
+  (canonical Git-blob SHA-256 for `ba94834:collaboration.md`
+  `398646895EEAFEDDD7B0D9C4DC421B69ACD23F1F288A8D37BAE8A616B592DAA8`)
   and `docs/history/DECISIONS_LOG.md` (baseline SHA-256
   `976928A2B8A5B3B85923C662D4814DE8C7850A3C6EA0987CE0112277B80B16D2`).
   Moved the completed Slice 2–4 plans with Git to
@@ -1473,3 +1473,28 @@ or coding sessions. It complements, but does not replace:
   measured savings. After approval, begin Slice 5 planning with its model
   checkpoint and provider research; do not implement Slice 5 from historical
   plans.
+
+## 2026-07-31 — Canonical collaboration archive hash corrected
+
+- Contributor/environment: SDE 2 / Codex desktop.
+- Slice: Documentation maintenance before Slice 5 planning.
+- Role: Implementer / documentation maintainer.
+- Implementation status: Complete; documentation-only correction.
+- Changes and corrections: Replaced the pre-refactor `collaboration.md`
+  baseline hash with the SHA-256 of the canonical LF-normalized Git blob at
+  `ba94834:collaboration.md`. The previous value was calculated from a Windows
+  CRLF working-tree copy. Archived content was already preserved correctly and
+  was not changed by this correction.
+- Files or areas affected: `docs/history/COLLABORATION_LOG.md` and the compact
+  handoff in `collaboration.md`. No code, tests, schema, credentials, plans, or
+  local database rows changed.
+- Verification: Confirmed the corrected value against the Git blob, checked
+  the focused diff, and ran `git diff --check`. The retained 171-test baseline
+  remains unchanged because no executable file changed.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, baseline
+  HEAD `d7a4f11` before this documentation-only correction.
+- Known limitations: SHA-256 values must be compared against canonical Git
+  blobs rather than line-ending-converted Windows working-tree files.
+- Next action: SDE 1 may begin Slice 5 planning after the owner gives the model
+  checkpoint and planning instruction. Slice 5 implementation remains blocked
+  until the owner approves its plan.
