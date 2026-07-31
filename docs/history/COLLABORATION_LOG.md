@@ -1498,3 +1498,68 @@ or coding sessions. It complements, but does not replace:
 - Next action: SDE 1 may begin Slice 5 planning after the owner gives the model
   checkpoint and planning instruction. Slice 5 implementation remains blocked
   until the owner approves its plan.
+
+## 2026-07-31 — Slice 5 plan created (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code.
+- Slice: Slice 5 (creator sources and demo mode) — planning only.
+- Role: Planner.
+- Implementation status: Not started.
+- Changes and corrections: Created docs/plans/SLICE_5_PLAN.md from the
+  owner-approved Slice 5 decisions. Planning was on Opus; the plan recommends
+  Sonnet for execution and asks the owner to confirm the switch at the top of
+  implementation. Provider research was verified against official sources on
+  2026-07-31: chosen creator actors are apify/instagram-scraper ($2.70 per
+  1,000 results on the Free plan) and clockworks/tiktok-scraper (advertised
+  from $1.70 per 1,000 results; Free-tier $3.70 per 1,000 per its tiered
+  table, plus a $0.001 actor-start fee), both called via Apify's REST
+  run-sync endpoint with the workspace's own token (BYO-key). The YouTube
+  quota claim was corrected to the current official model: search.list has a
+  dedicated bucket of 100 calls/day at 1 unit each, separate from the
+  10,000-units/day pool used by channels.list enrichment; live YouTube
+  requires a workspace key (no keyless discovery — a correction to SPEC §5
+  and the Settings hint). Owner-approved decisions captured verbatim in §1:
+  deterministic priority routing (Apify -> YouTube -> creator seed, no
+  auto-aggregation); Apify runs both IG and TikTok actors and merges
+  normalized candidates with explicit full-success / partial-success (new
+  SourceStatus.PARTIAL_RESULTS with sanitized provenance) / dual-failure
+  behavior and a deterministic failure precedence
+  (INVALID_KEY > INSUFFICIENT_PLAN > RATE_LIMITED > PROVIDER_ERROR >
+  NETWORK_ERROR); a target-type-aware additive creator heuristic (followers
+  25, niche/bio overlap 60, country 15) that leaves the business path and its
+  Slice 3 anchor scores unchanged; a five-category creator seed spread
+  (strong, partial, geographic-mismatch, weak/low-follower, irrelevant); and
+  the evidence_for(source_used, target_type, candidate) contract change so
+  business and creator seed evidence cannot collide. Live provider
+  HTTP-status -> typed-status mappings are explicitly marked as assumptions
+  until a §7.2 deletable script confirms them, as Slice 2 did for
+  Apollo/Gemini. The plan lists explicit acceptance criteria and retained
+  tests for Apify full success, partial success, dual failure, status
+  precedence, YouTube routing, seed fallback, creator scoring,
+  business-score regression protection, tenant isolation, sanitized audit
+  details, and the zero-key demo.
+- Files or areas affected: docs/plans/SLICE_5_PLAN.md (new), collaboration.md
+  (current handoff and recent activity), and this history entry. No
+  application code, tests, seeds, templates, styles, schema, or dependency
+  files were touched.
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of confirming the target branch
+  (codex/sde-1-slice-2-hardening) was clean at d54c0d8 with no other-SDE
+  activity in the reflog before writing; re-verifying the YouTube quota model
+  and both Apify actor prices against their official pages/docs; and a staging
+  check (git status / git diff --check / a credential-shaped-value scan)
+  confirming only the three intended documentation files changed with no
+  credential-shaped values and no executable files.
+- Last known working state: Branch codex/sde-1-slice-2-hardening at d54c0d8
+  before this planning commit; the application remains at the verified Slice 4
+  state. Only the three documentation files differ.
+- Known limitations: The Apify and YouTube HTTP-status mappings, the actor
+  output field names, and the pricing/quota figures are current best
+  information (provider-controlled, dated 2026-07-31) and must be re-verified
+  live before being relied upon in implementation. A live creator end-to-end
+  depends on the owner providing a free YouTube and/or Apify key; absent that,
+  verification will be seed plus mocked.
+- Next action: Owner and SDE 2 review docs/plans/SLICE_5_PLAN.md. After
+  approval and the model-switch checkpoint, implementation may begin on
+  Sonnet, starting with the §7.2 live error-shape verification before wiring
+  the sources, route, scoring, audit, and UI. Do not implement until then.

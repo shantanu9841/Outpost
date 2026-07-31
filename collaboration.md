@@ -22,23 +22,22 @@ Read this at the start of every session for active ownership and handoff state. 
 
 ## Current handoff
 
-- **Owner-approved activity:** Documentation context optimization and its final integrity-review correction before Slice 5.
-- **Role:** SDE 2 / Codex desktop completed the approved documentation-only work.
-- **Branch:** `codex/sde-1-slice-2-hardening`.
-- **Baseline before this refactor:** `ba94834` (`Document workspace-scoped Gemini verification`), clean tree, 171 tests passing.
-- **Product state:** Slices 0–4 are complete. No Slice 5 plan or implementation exists.
-- **Documentation state:** The mandatory active pack is approximately 8,878 tokens (10,559 with `design.md`), down from roughly 46,000. Full collaboration/decision history and completed Slice 2–4 plans are preserved under `docs/`.
-- **Provider state:** Live Gemini drafting succeeded with `gemini-3.6-flash` using the approved workspace-scoped setting. Apollo plan-limited fallback is verified. No credential is stored in tracked files.
-- **Known open work:** Slice 5 must research maintained Apify Instagram/TikTok actors and pricing and verify YouTube Data API search/quota before architecture is approved.
-- **Executable application work:** None. Only Markdown and plan-reference docstrings/comments changed.
-- **Next action:** SDE 1 may begin Slice 5 planning after the owner gives the model checkpoint and planning instruction. Do not implement until the owner approves the plan.
+- **Owner-approved activity:** Slice 5 (creator sources and demo mode) — planning only. The plan is written and awaiting owner/SDE 2 review before implementation.
+- **Role:** SDE 1 / Claude Code created the plan (Planner). Planning on Opus; execution recommended on Sonnet.
+- **Branch:** `codex/sde-1-slice-2-hardening`; this planning commit starts from `d54c0d8` (clean tree, 171 tests passing; no other SDE editing).
+- **Product state:** Slices 0–4 are complete. `docs/plans/SLICE_5_PLAN.md` now exists; no Slice 5 code, tests, seeds, templates, or schema change exists.
+- **Plan location:** Active plans live at `docs/plans/`; completed plans move to `docs/plans/completed/`.
+- **Provider research (2026-07-31):** Apify creator actors chosen — `apify/instagram-scraper` ($2.70/1,000 results, Free plan) and `clockworks/tiktok-scraper` (from $1.70/1,000; Free-tier $3.70/1,000). YouTube `search.list` verified against official docs to use a dedicated 100-calls/day bucket at 1 unit each, separate from the 10,000-units/day pool; live YouTube requires a workspace key (no keyless discovery). Live provider HTTP-status mappings remain assumptions until a §7.2 script confirms them.
+- **Owner-approved decisions:** Priority routing (Apify → YouTube → creator seed, no auto-aggregation); Apify merges IG+TikTok with partial-success and dual-failure precedence; target-type-aware creator scoring (followers 25 / niche 60 / country 15) with business anchors preserved; five-category creator seed spread; `evidence_for(source_used, target_type, candidate)` to avoid seed evidence collision.
+- **Executable application work:** None. Only plan and collaboration documentation changed in this commit.
+- **Next action:** Owner and SDE 2 review `docs/plans/SLICE_5_PLAN.md`. After approval and the model-switch checkpoint, implementation may begin on Sonnet, starting with the §7.2 live error-shape verification before wiring the sources. Do not implement until then.
 
 ## Recent activity
 
+- **Slice 5 plan created:** `docs/plans/SLICE_5_PLAN.md` written with owner-approved decisions and provider facts verified against official sources; explicit acceptance criteria and tests for Apify full/partial/dual-failure, status precedence, YouTube routing, seed fallback, creator scoring, business-score regression, tenant isolation, sanitized audit details, and the zero-key demo. Planning only.
 - **Archive hash correction:** Corrected the `collaboration.md` baseline SHA-256 to the canonical Git-blob value after review identified a Windows CRLF working-copy mismatch; archived content was already intact.
 - **Documentation context optimization:** Preserved the full decision and collaboration records in `docs/history/`, moved completed plans to `docs/plans/completed/`, and replaced active documents with routed summaries. Application behavior is unchanged.
 - **Live Gemini closure:** A DB-write-free `draft_outreach` call returned `DraftStatus.LLM_OK` on `gemini-3.6-flash`; `CLAUDE.md` records the safe workspace-scoped verification procedure.
-- **Slice 4 approval correction:** Save → revert to original → approve now clears stale `edited_body`; the retained suite increased to 171 tests.
 
 ## Detailed log procedure
 
