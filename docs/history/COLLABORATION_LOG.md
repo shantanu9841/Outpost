@@ -1907,3 +1907,133 @@ or coding sessions. It complements, but does not replace:
   implementation may begin on Sonnet, starting with the `models.py`/`llm.py`/
   `eval.py`/`routing.py` core, then the DB/route/UI wiring, then the §6
   verification. Do not implement until then.
+
+## 2026-08-01 — Slice 6 plan corrected to v2 (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 6 (evaluation and cost-aware routing) — planning only, v2
+- Role: Planner / correction implementer
+- Implementation status: Not started (plan under owner review)
+- Changes and corrections: Applied all ten owner-approved SDE 2 review
+  findings against v1 (`2f991a5`) to `docs/plans/SLICE_6_PLAN.md`. (1)
+  `app/llm.py`'s `_resolve_key` is corrected to drop the `GEMINI_API_KEY`
+  environment fallback entirely, making every LLM workflow strictly
+  workspace-key-only — a change to already-shipped Slice 2 code, not only
+  new Slice 6 modules, since intake/scoring/drafting share the same
+  `_resolve_key`. (2) The single-token `LLMResult` is replaced by a
+  `TokenUsage` dataclass carrying model id plus independently nullable
+  prompt/input, candidates/output, thinking, and total token counts. (3)
+  `generate_structured_with_usage` and `LLMError` both accumulate a
+  `list[TokenUsage]` across every attempt actually made — the first try, the
+  retry, and any attempt whose overall call ultimately falls back to a
+  heuristic — so spent tokens are never dropped just because the structured
+  parse failed; `TokenUsage` is defined to hold only a model name and plain
+  integers/`None`, so attaching it to `LLMError` cannot leak a payload or
+  credential. (4) "No model call was made" (a known `0`) and "a call
+  happened but usageMetadata was missing or malformed" (unknown, `None`) are
+  now distinct at every layer, including the aggregate `draft.cost_tokens`
+  and `estimated_cost_microusd`, which become `NULL` (never a fabricated
+  `0`) whenever any contributing attempt's total is unknown; one
+  documented exception is specified — `thoughtsTokenCount` absent from an
+  otherwise-present `usageMetadata` block is treated as a genuine, known
+  zero (a normal case for non-thinking model calls), distinct from the
+  whole-block-missing case. (5) Dollar accounting is corrected to price
+  each attempt at that attempt's own model's per-input/output/thinking
+  rate — never one blended total-token rate, and never mixed-model usage
+  priced only at the final/escalated model's rate — computed once at
+  creation time and persisted as a new `cost_breakdown_json` (per-attempt
+  detail) plus integer `estimated_cost_microusd` (millionths of a dollar,
+  to avoid floating-point drift), so a later change to the pricing constant
+  table can never retroactively alter a historical draft's stored estimate.
+  (6) A rejected key discovered during default drafting
+  (`DraftStatus.INVALID_GEMINI_KEY`) is now terminal for the whole routing
+  request: eval is called with the already-known rejection reason (skipping
+  its own live call) and escalation eligibility is forced false regardless
+  of fit/opt-in, with a call-count acceptance test added. (7) The `eval`
+  table's schema is corrected to `draft_id INTEGER NOT NULL UNIQUE
+  REFERENCES draft(id)`, enforcing exactly one eval per draft at the SQLite
+  level (not just in application logic), while keeping explicit
+  `workspace_id` scoping and the atomic draft/eval/cost/audit creation
+  transaction. (8) The deterministic heuristic rubric, previously described
+  only in prose, is now fully specified: personalization and specificity
+  are binary (25 or 0) grounded checks reusing `drafting._recipient_identity`
+  and `drafting._parse_fit_reasons`/`_norm_for_substring` rather than
+  duplicating that logic; non-genericness is two independent sub-checks (a
+  0-or-15 banned-phrase check against a new shared `BANNED_FILLER_PHRASES`
+  constant moved out of `drafting.SYSTEM_PROMPT`'s prose and into real
+  Python, and a 0-or-10 sentence-length-variety check) summing to one of
+  four exact totals; clear-ask counts question-mark-terminated sentences
+  (1 -> 25, 0 -> 0, 2+ -> 10); a missing-body defensive path is specified;
+  and the exact nested `EvalDimension` (points + justification, each
+  independently validated) / `EvalRubric` / `EvalResult` (with a
+  model-validator enforcing `score` equals the sum of the four dimensions'
+  points) Pydantic shapes are given in full. (9) All "free model"/"free
+  tier" language is replaced with "default model" and "estimated paid
+  list-price cost" throughout the plan and the UI copy it specifies,
+  including a corrected Settings hint for the existing Gemini key card
+  (whose current copy references the environment fallback removed by
+  correction 1); the plan states plainly that default drafting and the LLM
+  judge both spend the workspace owner's real Google-project quota once a
+  key is present, and that the only genuinely zero-cost state is no
+  workspace key at all. (10) The plan adds an explicit completion-gating
+  decision: Slice 6's code, tests, and UI may be complete and committed
+  while `ESCALATION_MODEL` stays unset, but Slice 6 itself is not marked
+  complete against `SPEC.md` §6 until the owner approves a specific
+  stronger model id and it passes the same kind of safe verification gate
+  Slice 5 used for Apify/YouTube — never a paid live call without explicit
+  authorization. Also resolved, per the owner's explicit instruction rather
+  than left open as in v1: paid-tier opt-in storage is now a firm decision
+  (a dedicated, idempotently migrated `workspace.paid_tier_enabled INTEGER
+  NOT NULL DEFAULT 0` column, guarded by a `PRAGMA table_info`-based
+  add-column-if-missing helper reused for `draft`'s two new cost columns) —
+  product configuration, not a credential, workspace-scoped, and default
+  off so every existing Slice 1-5 workspace is unaffected. The proposed
+  `HIGH_FIT_THRESHOLD = 85` and `CONFIDENCE_THRESHOLD = 80` (both stated as
+  inclusive) and the four-dimension x 0-25 eval scale are kept as v1
+  proposed them, per the owner's explicit instruction. `app/agent/
+  drafting.py` is added to Slice 6's in-scope/files-touched lists (it was
+  absent from v1) since it now hosts `BANNED_FILLER_PHRASES`, gains a
+  `usage: list[TokenUsage]` field on `DraftResult`, and gains an optional
+  `model` parameter on `draft_outreach` so routing's escalation call reuses
+  the same function rather than duplicating drafting logic. The acceptance
+  criteria list (plan section 6) grew from 15 to 22 items, adding explicit
+  coverage for retry/failure usage accumulation, mixed-model pricing,
+  unknown-vs-zero usage, environment-key exclusion (both for drafting/
+  routing and for eval/escalation), terminal invalid-key call-count,
+  inclusive threshold boundaries at both edges, opt-in default-off/
+  isolation, eval uniqueness at the database level, atomic rollback, and
+  UI wording (no "free" language). Left explicitly open in the plan's own
+  section 8, not resolved by this pass: the stronger model id and its
+  pricing (owner-gated per correction 10); `gemini-3.6-flash`'s exact
+  current per-token-type rates, deliberately left as unfabricated
+  placeholders in the plan text, to be filled from the official pricing
+  page before implementation rather than guessed now; the plan's own
+  interpretation of thinking-token absence as a known zero, flagged for the
+  owner to confirm against current official documentation if desired; and
+  the exact LLM-judge prompt wording, left to implementation.
+- Files or areas affected: `docs/plans/SLICE_6_PLAN.md` (rewritten, v1 ->
+  v2), `collaboration.md` (handoff + recent activity), and this history
+  entry. No application code, tests, templates, styles, seeds, schema, or
+  dependency files were touched.
+- Verification: Documentation-only change; no app code was written or run.
+  The 212-test Slice 5 baseline is unchanged and was re-confirmed passing
+  before this revision began. `git diff --check` passes on the three
+  changed files. A credential-shaped-string scan (API-key/token/Bearer
+  patterns) across the three changed files found no matches. Confirmed via
+  `git status` that only `docs/plans/SLICE_6_PLAN.md`, `collaboration.md`,
+  and `docs/history/COLLABORATION_LOG.md` are staged, and that the working
+  tree is clean immediately after the commit.
+- Last known working state: `codex/sde-1-slice-2-hardening` at `b640b49`;
+  the application is unchanged at the Slice 5 completion state. Only these
+  three documentation files differ from that baseline.
+- Known limitations: Every numeric pricing constant in the plan is an
+  explicit, labelled placeholder, not a verified figure — implementation
+  must not proceed with a guessed number. The stronger model id remains
+  entirely undecided, by design, per correction 10. No live provider call
+  of any kind was made or needed for this documentation-only revision.
+- Next action: Owner reviews `docs/plans/SLICE_6_PLAN.md` v2. After
+  explicit implementation approval and the model-switch confirmation to
+  Sonnet, implementation may begin per the plan's section 5 build order
+  (llm.py/drafting.py/models.py core, then eval.py/routing.py, then DB/
+  route/UI wiring, then the section 6 verification). Do not implement
+  until then.
