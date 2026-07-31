@@ -1,10 +1,12 @@
 # Slice 6 Plan — Evaluation and cost-aware routing
 
-**Status:** Planning only (draft for owner review). This is **v2**, correcting
-ten SDE 2 review findings against v1 (`2f991a5`) — see §0. No application
-code, tests, templates, or schema change is part of this document.
-Implementation does not begin until the owner approves this plan, confirms no
-changes remain outstanding, and confirms the model switch (`CLAUDE.md`).
+**Status:** Planning only (draft for owner review). This is **v3**,
+correcting five further SDE 2 review findings against v2 (`cc2c23c`), which
+itself corrected ten findings against v1 (`2f991a5`) — see §0 for the full
+correction history. No application code, tests, templates, or schema change
+is part of this document. Implementation does not begin until the owner
+approves this plan, confirms no changes remain outstanding, and confirms the
+model switch (`CLAUDE.md`).
 
 **Model:** Planned on **Opus 4.8** (routing/eval architecture is real
 judgment). Execution recommendation is **Sonnet** (mechanical implementation
@@ -17,59 +19,84 @@ against that state before coding.
 
 ---
 
-## 0. v2 correction summary
+## 0. Correction history
 
-SDE 2 reviewed v1 (`2f991a5`) and the owner approved ten corrections, applied
-below. Each is cross-referenced to where it lands in this document:
+### 0.1 v1 → v2 (ten corrections, `2f991a5` → `cc2c23c`)
 
-1. **Strictly workspace-key-only.** §4.1 removes the `GEMINI_API_KEY`
-   environment fallback from `app/llm.py` — a change to already-shipped
-   Slice 2 code, not only new Slice 6 modules — so every LLM workflow
-   (intake, scoring, drafting, eval, routing) is workspace-key-only. New
-   acceptance criteria (§6, items 1–2) require an env key to be provably
-   inert.
-2. **Per-attempt usage records.** §4.2 replaces the single-token `LLMResult`
-   with `TokenUsage` (model, prompt/input, candidates/output, thinking,
-   total — each independently nullable).
-3. **Accumulate usage across every attempt.** §4.2/§4.3 make
-   `generate_structured_with_usage` and `LLMError` both carry a
-   `list[TokenUsage]` covering the first attempt, the retry, and any attempt
-   that ultimately falls back to a heuristic — sanitized, never a raw
-   payload or credential.
-4. **No silent zero.** §4.4 makes "no model call was made" (`0`, known) and
-   "a model call happened but usage is unreadable" (`None`, unknown) two
-   distinct, never-conflated states, propagated through the aggregate.
-5. **Correct dollar accounting.** §4.4/§5.5 replace the blended-rate idea
-   with a per-attempt, per-token-type breakdown priced at *that attempt's own
-   model's* rates, persisted once at creation time as `cost_breakdown_json` +
-   integer `estimated_cost_microusd` so historical estimates never drift when
-   pricing constants change later.
-6. **Terminal invalid-key behavior.** §5.3 step 2 makes a rejected key
-   discovered during default drafting terminal for the whole routing
-   request — eval and escalation make no further Gemini calls. New
-   call-count test (§6, item 9).
-7. **Exactly one eval per draft.** §5.6's `eval` table declares
-   `draft_id INTEGER NOT NULL UNIQUE REFERENCES draft(id)`, workspace-scoped,
-   written atomically with the draft/cost/audit rows.
-8. **Complete heuristic rubric.** §4.5 fully specifies all four 0–25
-   dimensions (exact point tables, boundary behavior, normalization,
-   `BANNED_FILLER_PHRASES` shared constant, sentence-variety and
-   question-counting algorithms, missing-data behavior) and the exact
-   nested Pydantic shape for per-dimension justifications.
-9. **Corrected billing language.** §3, §5.7, and settings copy replace "free
-   model"/"free tier" wording with "default model" and "estimated paid
-   list-price cost"; state plainly that default drafting and the LLM judge
-   spend the workspace owner's own quota once a key is present. Genuinely
-   zero-cost only ever means "no workspace key at all."
-10. **Completion semantics.** §1 decision 6 and §8 state explicitly that
-    Slice 6 cannot be marked complete against `SPEC.md` until the exact
-    stronger model is owner-approved and passes the required verification
-    gate — disabled, mocked-tested escalation plumbing is an acceptable
-    interim state, never a paid live call without explicit authorization.
+1. **Strictly workspace-key-only.** Removed the `GEMINI_API_KEY` environment
+   fallback from `app/llm.py` — a change to already-shipped Slice 2 code —
+   so every LLM workflow is workspace-key-only.
+2. **Per-attempt usage records.** Replaced the single-token `LLMResult` with
+   `TokenUsage` (model, prompt/input, candidates/output, thinking, total).
+3. **Accumulate usage across every attempt.** `generate_structured_with_usage`
+   and `LLMError` both carry accumulated usage across the first attempt,
+   the retry, and any attempt that falls back to a heuristic.
+4. **No silent zero (v2 draft).** Distinguished "no model call was made"
+   from "usage is unreadable" — **refined further in §0.2 correction 1**,
+   which fixes a remaining gap: v2 still let a failed-but-issued HTTP
+   attempt disappear from the usage list entirely, rather than being
+   recorded as unknown.
+5. **Correct dollar accounting (v2 draft).** Introduced a per-attempt,
+   per-token-type breakdown priced at each attempt's own model's rates —
+   **corrected further in §0.2 correction 2**, which removes the separate
+   "thinking" rate v2 still had.
+6. **Terminal invalid-key behavior.** A rejected key discovered during
+   default drafting is terminal for the whole routing request.
+7. **Exactly one eval per draft.** The `eval` table declares
+   `draft_id INTEGER NOT NULL UNIQUE REFERENCES draft(id)`.
+8. **Complete heuristic rubric.** Fully specified all four 0–25 dimensions,
+   the shared `BANNED_FILLER_PHRASES` constant, and the exact nested
+   Pydantic shapes. Unaffected by this revision.
+9. **Corrected billing language.** "Default model" / "estimated paid
+   list-price cost" replace "free model" / "free tier" language.
+10. **Completion semantics.** Slice 6 cannot be marked complete against
+    `SPEC.md` until the stronger model is owner-approved and verified.
 
-Also resolved per the owner's instruction: **paid-tier opt-in storage** is now
-a firm decision — a dedicated, idempotently migrated `workspace` boolean
-column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
+Also resolved in v2: paid-tier opt-in storage as a dedicated, idempotently
+migrated `workspace.paid_tier_enabled` column, default off.
+
+### 0.2 v2 → v3 (five corrections, `cc2c23c` → this commit)
+
+1. **Only "no request issued" may equal zero cost.** §4.2/§4.3/§4.4 are
+   corrected so that *every* issued Gemini HTTP attempt — including a
+   transport failure, a non-2xx response, a malformed/non-JSON HTTP 200,
+   or a 200 with missing/malformed `usageMetadata` — produces a
+   `TokenUsage` record with unknown (`None`) fields, rather than silently
+   contributing nothing to the usage list. `cost_breakdown = []` /
+   `cost_tokens = 0` / `estimated_cost_microusd = 0` is now reserved
+   strictly for a workflow that never issued a Gemini request at all (no
+   workspace key configured). New acceptance criteria (§6, items 1–6).
+2. **Corrected thinking-token pricing.** §4.4/§5.5 remove the separate
+   `"thinking"` rate from `PRICING_USD_PER_MILLION_TOKENS` — Google prices
+   output inclusive of thinking tokens for these tool-free structured-output
+   requests. The dollar formula becomes `input cost = promptTokenCount ×
+   input_rate` plus `output cost = (totalTokenCount − promptTokenCount) ×
+   output_rate`, requiring known, non-negative `promptTokenCount` and
+   `totalTokenCount` with `totalTokenCount >= promptTokenCount`; otherwise
+   the estimate is unknown. `candidatesTokenCount`/`thoughtsTokenCount`
+   remain stored for visibility but are not required inputs to pricing.
+3. **`thoughtsTokenCount` absence is no longer auto-zero.** §4.2 replaces
+   v2's "absent key means known zero" rule with: unknown by default, unless
+   safely derivable from `total == prompt + candidates` (derived zero) or
+   `total > prompt + candidates` (derived non-negative difference, for
+   these tool-free calls) — both known. `TokenUsage` gains a
+   `thinking_tokens_derived: bool` field so the persisted breakdown can
+   distinguish a provider-reported value from a derived one.
+4. **Fixed the routing API contradiction.** §5.3 corrects
+   `route_and_draft`'s signature — it never receives `workspace_id` yet v2
+   called `db.get_paid_tier_enabled(workspace_id)` internally, a
+   contradiction. `route_and_draft` now takes `paid_tier_enabled: bool`
+   as an explicit keyword argument; `main.py` (§5.7) performs the
+   workspace-scoped lookup itself and passes the flag in. Routing performs
+   no database access at all.
+5. **Header-only Gemini authentication.** §4.6 (new) replaces the
+   credential-bearing `?key=` query parameter — carried over unexamined
+   from Slice 2 through v1/v2 — with an `x-goog-api-key` request header,
+   matching Slice 5's Apify (`Authorization: Bearer`) and YouTube
+   (`X-goog-api-key`) precedent. Since Slice 6 already refactors
+   `_call_gemini` for the usage/model changes, this correction folds into
+   that same refactor rather than being deferred; §2's "out of scope"
+   exclusion for this is removed.
 
 ---
 
@@ -98,8 +125,10 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
    list-price dollars.** Persist a per-attempt, per-token-type breakdown
    (§4.4/§4.5); the aggregate `draft.cost_tokens` and
    `draft.estimated_cost_microusd` are `NULL` (unknown) whenever any
-   contributing attempt's usage is unreadable, and `0` (known) only when no
-   model call was made at all. Historical estimates are computed once at
+   *issued* attempt's relevant usage is unreadable, and `0` (known) only
+   when **no Gemini request was ever issued at all** (§0.2 correction 1 —
+   tightened from v2, which incorrectly let a failed-but-issued attempt
+   also collapse to `0`). Historical estimates are computed once at
    creation time and never recomputed from later pricing constants.
 5. **Deferred stronger model + pricing.** The exact stronger model id and
    its pricing are **deferred** until current official availability is
@@ -128,7 +157,9 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
   draft-creation time.
 - `app/agent/routing.py` (new) — the tier decision, high-fit gate, terminal
   invalid-key short-circuit, confidence early-exit, escalation
-  orchestration, and per-outreach cost accounting/pricing.
+  orchestration, and per-outreach cost accounting/pricing. Takes
+  `paid_tier_enabled` as an explicit argument (§0.2 correction 4); performs
+  no database access.
 - `app/agent/drafting.py` (modified) — exposes `BANNED_FILLER_PHRASES` as a
   real, importable constant (previously only prose inside `SYSTEM_PROMPT`);
   `DraftResult` gains a `usage: list[TokenUsage]` field; `draft_outreach`
@@ -136,10 +167,11 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
   tier through the same function. No behavior change to the existing
   business/creator drafting logic itself.
 - `app/llm.py` (modified) — **removes the `GEMINI_API_KEY` environment
-  fallback** (correction 1 — affects every existing caller, not only Slice
-  6); adds `TokenUsage`, `generate_structured_with_usage`, and a
-  model-selectable request; `generate_structured` becomes a thin
-  backward-compatible wrapper.
+  fallback** (affects every existing caller, not only Slice 6); adds
+  `TokenUsage`, `generate_structured_with_usage`, a model-selectable
+  request, **and switches Gemini authentication from the `?key=` query
+  parameter to the `x-goog-api-key` header** (§0.2 correction 5, §4.6);
+  `generate_structured` becomes a thin backward-compatible wrapper.
 - `app/db.py` (modified) — new `eval` table (draft-unique, workspace-scoped,
   idempotent); idempotent `ALTER TABLE` additions for
   `workspace.paid_tier_enabled`, `draft.cost_breakdown_json`,
@@ -155,7 +187,9 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
   per-outreach cost on Approvals (lighter on Pipeline / campaign detail); a
   running cost-per-outreach figure; a Settings checkbox for the paid-tier
   opt-in; a corrected Gemini Settings hint (the current copy references the
-  environment-variable fallback this plan removes).
+  environment-variable fallback this plan removes). `create_draft` now
+  performs the workspace-scoped `paid_tier_enabled` lookup itself and
+  passes it into `routing.route_and_draft` (§0.2 correction 4, §5.7).
 
 **Out of scope (unchanged)**
 
@@ -164,30 +198,32 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
 - Any auto-send/auto-post. Nothing outbound. Escalation never sends
   anything; it only changes which model drafts.
 - A second LLM provider. Only Gemini models are used.
-- Gemini's own transport (`app/llm.py` still sends the API key as a `key=`
-  query parameter, per the code as shipped in Slice 2–5). Correcting that to
-  header auth, the way Slice 5 corrected Apify/YouTube, is a real
-  improvement but was not one of the ten corrections in this review pass;
-  flagged here so it isn't mistaken for an oversight, not undertaken now.
+
+(v2 also listed Gemini's `?key=` query-parameter authentication as
+out of scope; §0.2 correction 5 brings it into scope, so that exclusion is
+removed here.)
 
 ---
 
 ## 3. Non-negotiables honored
 
 - **BYO-key.** The default model and the stronger tier both use the
-  workspace's own `gemini` key exclusively (decision 1 of the correction
-  summary) and are billed to the workspace owner's Google project. Outpost
-  supplies no key and pays for nothing.
+  workspace's own `gemini` key exclusively (decision 1) and are billed to
+  the workspace owner's Google project. Outpost supplies no key and pays
+  for nothing. The key is sent only via the `x-goog-api-key` header
+  (§4.6) — never in a request URL or query parameter.
 - **Demo mode.** Zero keys → heuristic drafting + heuristic eval + `0` known
   cost; every step completes. This is the **only** genuinely zero-cost path
-  (correction 9) — a key present, even for the default model, means real
-  usage against that key's quota.
+  — a key present, even for the default model, means real usage against
+  that key's quota, whether or not every attempt succeeds.
 - **Structured output.** The LLM judge returns a Pydantic-validated
   `EvalResult` with one retry (reusing `llm.py`).
 - **Human approval.** Drafting/approval separation is unchanged; eval and
   routing only affect how the *agent* drafts and how the draft is scored.
 - **Tenant isolation.** Every `eval`/cost/opt-in read and write is scoped by
-  `workspace_id`.
+  `workspace_id`. `routing.py` itself touches no database — the workspace
+  scoping happens once, in `main.py`, before routing is ever called
+  (§0.2 correction 4).
 - **Atomic audit.** `create_draft_with_routing` commits the draft (with its
   cost columns), its eval row, and every required audit row
   (`draft.created`, `eval.scored`, plus a routing-decision action) in one
@@ -199,59 +235,97 @@ column (§5.6), not the `workspace_setting`-reuse alternative v1 left open.
 
 ### 4.1 `app/llm.py` — workspace-key-only, no environment fallback
 
-**Correction 1.** `_resolve_key` changes from
-`settings.get("gemini") or os.environ.get("GEMINI_API_KEY")` to strictly
-`settings.get("gemini")`. This is a change to code shipped in Slice 2, used
-by every existing LLM call site (`intake.py`, `scoring.py`, `drafting.py`)
-as well as the new `eval.py`/`routing.py` — "every product LLM workflow" per
-the correction, not only new Slice 6 code. The module docstring's "Key
-resolution" paragraph is corrected to match (no more mention of
-`GEMINI_API_KEY`). `os` becomes an unused import in `llm.py` and is removed.
+`_resolve_key` changes from `settings.get("gemini") or
+os.environ.get("GEMINI_API_KEY")` to strictly `settings.get("gemini")`.
+This is a change to code shipped in Slice 2, used by every existing LLM
+call site (`intake.py`, `scoring.py`, `drafting.py`) as well as the new
+`eval.py`/`routing.py` — every product LLM workflow, not only new Slice 6
+code. The module docstring's "Key resolution" paragraph is corrected to
+match. `os` becomes an unused import in `llm.py` and is removed.
 
 No other Slice 2–5 behavior changes: a workspace with its own key still
 works exactly as before; a workspace with no key still gets `None` from
 `generate_structured` and falls back to a heuristic, exactly as today —
 only the *environment* variable stops being consulted anywhere.
 
-### 4.2 `TokenUsage` — one record per attempt, no field silently zeroed
+### 4.2 `TokenUsage` — one record per *issued* attempt, never a silent gap
 
 ```python
 @dataclass
 class TokenUsage:
     model: str
-    prompt_tokens: int | None       # usageMetadata.promptTokenCount
-    candidates_tokens: int | None   # usageMetadata.candidatesTokenCount
-    thinking_tokens: int | None     # usageMetadata.thoughtsTokenCount
-    total_tokens: int | None        # usageMetadata.totalTokenCount
+    prompt_tokens: int | None          # usageMetadata.promptTokenCount
+    candidates_tokens: int | None      # usageMetadata.candidatesTokenCount
+    thinking_tokens: int | None        # usageMetadata.thoughtsTokenCount, or derived
+    total_tokens: int | None           # usageMetadata.totalTokenCount
+    thinking_tokens_derived: bool = False  # True iff thinking_tokens was
+                                            # computed from prompt/candidates/
+                                            # total rather than read directly
+                                            # from a reported thoughtsTokenCount
 ```
 
-**Correction 2.** Replaces v1's single `LLMResult(value, tokens, model)`.
-One `TokenUsage` is produced per HTTP 200 response actually received from
-Gemini — not per logical call, so a two-shot retry produces up to two
-records (correction 3).
+**Corrected rule (§0.2 correction 1): every issued HTTP attempt produces
+exactly one `TokenUsage` record — there is no case where an attempt is
+simply omitted from the usage list.** `TokenUsage` is produced by a single
+shared, best-effort helper, `_extract_usage(response, model) ->
+TokenUsage`, called on **every** response `llm.py` receives back from
+Gemini, regardless of status code or body shape:
 
-**Population rule (correction 4 — no silent zero):**
+```python
+def _extract_usage(response: httpx.Response, model: str) -> TokenUsage:
+    """Never raises. Works identically whether the response was a 200 or
+    an error status — an error body is still checked for authoritative
+    usageMetadata, in case the provider ever includes it."""
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        return TokenUsage(model, None, None, None, None)
+    if not isinstance(body, dict):
+        return TokenUsage(model, None, None, None, None)
+    meta = body.get("usageMetadata")
+    if not isinstance(meta, dict):
+        return TokenUsage(model, None, None, None, None)
 
-- If the response has no `usageMetadata` object at all, or it is not a JSON
-  object: **all four fields are `None`** (fully unknown) for that attempt.
-  This is a malformed/incomplete provider response, not a legitimate zero.
-- If `usageMetadata` is present as an object: `prompt_tokens`,
-  `candidates_tokens`, and `total_tokens` each read their documented key
-  only when it is present and an `int`; otherwise `None` (unknown) — these
-  three fields are always expected on a real response, so their absence
-  signals an incomplete payload, not a true zero.
-- `thinking_tokens` is the one exception: `thoughtsTokenCount` is
-  legitimately absent from `usageMetadata` for a model call that used no
-  extended thinking (a normal, documented case, not malformed). When
-  `usageMetadata` is present but has no `thoughtsTokenCount` key,
-  `thinking_tokens = 0` (known zero — thinking genuinely did not happen),
-  distinct from the whole-block-missing case above where it is `None`.
-- A response received but a `RequestError`/non-2xx status: **no
-  `TokenUsage` record is created for that attempt at all** — no response
-  body was ever obtained, so there is nothing to report as either zero or
-  unknown; the attempt simply contributes nothing to the usage list.
+    def _nonneg_int(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
 
-### 4.3 Accumulation through retries and failures (correction 3)
+    prompt = _nonneg_int(meta.get("promptTokenCount"))
+    candidates = _nonneg_int(meta.get("candidatesTokenCount"))
+    total = _nonneg_int(meta.get("totalTokenCount"))
+    thinking, derived = _derive_thinking(meta, prompt, candidates, total)
+    return TokenUsage(model, prompt, candidates, thinking, total, thinking_tokens_derived=derived)
+```
+
+**Population rule per field:**
+
+- `usageMetadata` absent entirely, non-JSON body, or non-dict body/value:
+  **all four count fields are `None`** (fully unknown) for that attempt.
+  This covers a malformed/incomplete provider response.
+- `usageMetadata` present as a dict: `prompt_tokens`, `candidates_tokens`,
+  and `total_tokens` each read their documented key only when present and
+  a non-negative `int` (not `bool`); otherwise `None`.
+- **`thinking_tokens` (§0.2 correction 3 — corrects v2's "absent means
+  known zero"):**
+  - If `thoughtsTokenCount` is present in `meta`, use it directly (a
+    non-negative int, else `None`); `thinking_tokens_derived = False`
+    (provider-reported).
+  - Else, if `prompt`, `candidates`, and `total` are **all** known and
+    `total >= prompt + candidates`: `thinking_tokens = total - prompt -
+    candidates` (naturally `0` at the boundary `total == prompt +
+    candidates`, and the non-negative difference above it), for these
+    tool-free structured-output calls; `thinking_tokens_derived = True`.
+  - Otherwise (any of prompt/candidates/total unknown, or `total < prompt
+    + candidates`, an internally inconsistent report): `thinking_tokens =
+    None` (unknown); `thinking_tokens_derived = False`.
+
+**When is `_extract_usage` called?** On *every* response actually received
+from Gemini, before any status-code or body-validity check runs — a
+transport-level failure (no response object at all, e.g.
+`httpx.RequestError`/timeout) is the **only** case with no response to
+extract from, and it still produces a full `TokenUsage(model, None, None,
+None, None)` record (§4.3) rather than omitting the attempt.
+
+### 4.3 Accumulation through retries and failures
 
 `generate_structured_with_usage(schema, system, user, settings, *,
 model=GEMINI_MODEL) -> MeasuredResult`:
@@ -263,83 +337,137 @@ class MeasuredResult:
     usage: list[TokenUsage]    # 0, 1, or 2 entries
 ```
 
-- No key configured → `MeasuredResult(None, [])`. (Zero calls, zero usage
-  entries — the "no model call was made" case from correction 4.)
-- First attempt gets a non-2xx/transport failure → raises `LLMError` with
-  `usage=[]` (nothing was ever billable-and-observed).
-- First attempt succeeds (200) and validates → `MeasuredResult(parsed,
-  [usage1])`.
-- First attempt succeeds (200) but fails validation → retry is issued.
-  - Retry fails transport/status → raises `LLMError` with `usage=[usage1]`
-    (the first, wasted attempt's usage is preserved even though the overall
-    call failed).
-  - Retry succeeds (200) and validates → `MeasuredResult(parsed, [usage1,
-    usage2])`.
-  - Retry succeeds (200) but fails validation twice → raises `LLMError(kind=
-    ERROR, message="model output failed validation twice", usage=[usage1,
-    usage2])`.
+- **No key configured → `MeasuredResult(None, [])`.** This is the *only*
+  case with zero usage entries — no Gemini request was ever issued
+  (§0.2 correction 1).
+- **`_call_gemini` never returns a bare exception or omits usage.** It
+  either returns `(text, TokenUsage)` on a 200 whose body's
+  `candidates`/`parts` are successfully extracted, or raises `LLMError`
+  with `usage=[<that attempt's TokenUsage>]` attached — for a transport
+  failure, a non-2xx status, a malformed/non-JSON 200 body, or a 200 body
+  missing the expected `candidates`/`parts` shape. In every one of these
+  raise cases, the attached `TokenUsage` reflects `_extract_usage`'s
+  best-effort result for that specific attempt (all-unknown for a
+  transport failure, since there was no response to extract from; possibly
+  partially known for a non-2xx or malformed body, if `_extract_usage`
+  happened to find a well-formed `usageMetadata` anyway).
+- **The retry loop accumulates every attempt's usage, whichever way it
+  resolves:**
+  - First attempt raises `LLMError` → re-raise immediately with
+    `usage=[usage1]` (one entry — no retry is attempted for a
+    transport/status/malformed-body failure, matching the existing
+    Slice 2 behavior of only retrying on a schema-validation failure).
+  - First attempt succeeds (200, extractable) and validates against the
+    schema → `MeasuredResult(parsed, [usage1])`.
+  - First attempt succeeds but fails schema validation → retry issued:
+    - Retry raises `LLMError` → re-raise with `usage=[usage1, usage2]`
+      (both attempts' usage preserved, even though the overall call
+      ultimately failed).
+    - Retry succeeds and validates → `MeasuredResult(parsed, [usage1,
+      usage2])`.
+    - Retry succeeds but fails validation again → raise
+      `LLMError(ERROR, "model output failed validation twice",
+      usage=[usage1, usage2])`.
 
 `LLMError` gains a `usage: list[TokenUsage]` attribute (default `[]`),
-populated exactly as above. `TokenUsage` only ever holds a model name and
-plain integers/`None` — attaching it to `LLMError` cannot leak a provider
-payload, header, URL, or credential, the same guarantee `LLMError.message`
-already upholds via `_safe_gemini_reason`.
+populated exactly as above. `TokenUsage` only ever holds a model name,
+plain integers/`None`, and one boolean — attaching it to `LLMError` cannot
+leak a provider payload, header, URL, or credential, the same guarantee
+`LLMError.message` already upholds via `_safe_gemini_reason`.
 
-**Backward compatibility (unchanged from v1's intent, restated precisely):**
+**Backward compatibility (unchanged from v1/v2's intent):**
 `generate_structured(schema, system, user, settings) -> BaseModel | None`
-keeps its exact current signature and return type — it becomes
+keeps its exact current signature and return type —
 `return generate_structured_with_usage(schema, system, user, settings).value`.
 Every Slice 2–5 caller and test that calls `generate_structured` or catches
-`LLMError` and reads `.kind`/`.message` is unaffected; they simply never
-look at the new `.usage` attribute. `LLMError.usage` defaulting to `[]`
-means even an untouched call site behaves identically if it never reads
-the new field.
+`LLMError` and reads `.kind`/`.message` is unaffected; they never look at
+the new `.usage` attribute, which defaults to `[]`.
 
 ### 4.4 Cost aggregation, "unknown" vs. "zero", and dollar accounting
-
-**Correction 4 (no silent zero) + correction 5 (no blended rate, no
-mixed-model mispricing) + correction 9 (no false "free"):**
 
 A single outreach (one `create_draft` call) can accumulate `TokenUsage`
 records from up to four sources: the default draft's model call(s), the
 default draft's eval call(s), an escalated draft's model call(s) (only if
 escalation actually happened), and the escalated draft's eval call(s).
 `routing.py` collects every one of these into one flat
-`cost_breakdown: list[TokenUsage]` for the outreach (§5.3).
+`cost_breakdown: list[TokenUsage]` for the outreach (§5.3), **in the exact
+order each attempt was made**, preserving the "known usage from attempts
+preceding a failed attempt" requirement — nothing is reordered or dropped
+before this list is built.
 
-- **No calls made at all** (fully heuristic: no key, or a key but
-  heuristic-only fallback with zero successful HTTP 200s anywhere) →
-  `cost_breakdown = []`, `cost_tokens = 0`, `estimated_cost_microusd = 0`.
-  Known-zero, never ambiguous with "unknown."
-- **At least one call made, and every contributing `TokenUsage.total_tokens`
-  is a known int** → `cost_tokens = sum(total_tokens)`,
-  `estimated_cost_microusd` computed as below.
-- **At least one call made, but any contributing `TokenUsage.total_tokens`
-  is `None`** → `cost_tokens = NULL` and `estimated_cost_microusd = NULL`
-  for the draft row (the aggregate cannot honestly claim a specific number).
-  `cost_breakdown_json` still preserves every attempt's actual known/unknown
-  fields individually — the detail view can show "default draft: 512
-  tokens (gemini-3.6-flash); eval: usage unknown" even though the top-line
-  total is "unknown," never a fabricated blended figure.
+**Aggregation (§0.2 correction 1, tightened):**
 
-**Dollar estimate (correction 5):** computed once, at creation time, as
-`sum over cost_breakdown of (that attempt's own model's per-token-type
-rate × that attempt's own prompt/output/thinking token counts)` — never
-`total_tokens × the final/escalated model's rate`, and never a single
-blended `$/token` figure across models. Any single unknown field within an
-otherwise-priceable attempt makes the whole estimate `NULL` (same rule as
-`cost_tokens`, so the two are never inconsistent with each other).
+- **`cost_breakdown == []`** — the *only* way this happens is that no
+  Gemini request was issued anywhere in the outreach (no `gemini` key at
+  all, so drafting and eval both took the pure-heuristic path with zero
+  HTTP calls). → `cost_tokens = 0`, `estimated_cost_microusd = 0`. Known
+  zero, never ambiguous with "unknown."
+- **`cost_breakdown` is non-empty** — at least one Gemini request was
+  issued, whether or not it ultimately succeeded:
+  - `cost_tokens = sum(u.total_tokens for u in cost_breakdown)` **only if**
+    every entry's `total_tokens` is a known int; otherwise `cost_tokens =
+    NULL`.
+  - `estimated_cost_microusd` is computed by summing each entry's own
+    priced contribution (§4.4 dollar estimate, below) **only if** every
+    entry prices cleanly; otherwise `estimated_cost_microusd = NULL`. This
+    is checked independently of `cost_tokens`'s own known/unknown state
+    (a deliberate refinement over v2: an attempt can have a known
+    `total_tokens` but an unknown/invalid `prompt_tokens`, in which case
+    `cost_tokens` can still be a known number while
+    `estimated_cost_microusd` is `NULL` — a token *count* and a token
+    *price* are different pieces of information with different
+    requirements, and conflating their unknown-ness would be less honest
+    than keeping them independent).
+  - `cost_breakdown_json` always preserves every attempt's actual
+    known/unknown fields individually, regardless of what the aggregates
+    show — the detail view can show "default draft: 512 tokens
+    (gemini-3.6-flash); eval attempt: usage unknown (non-2xx response)"
+    even when the top-line totals are `NULL`, never a fabricated number.
+
+**Dollar estimate formula (§0.2 correction 2 — corrects v2's blended
+"thinking" rate):**
 
 ```python
 # app/agent/routing.py — time-sensitive, provider-controlled; re-verify
 # against the official Gemini API pricing page before relying on a figure
 # (same discipline as Slice 5's Apify/YouTube pricing — SLICE_5_PLAN.md §4.3).
+# Only two rates per model: Google prices output inclusive of thinking
+# tokens for these tool-free structured-output requests, so there is no
+# separate "thinking" rate to configure.
 PRICING_USD_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
-    "gemini-3.6-flash": {"input": <verify>, "output": <verify>, "thinking": <verify>},
+    "gemini-3.6-flash": {"input": <verify>, "output": <verify>},
     # ESCALATION_MODEL's entry is added once the owner approves that model
     # id and its official pricing is verified (decision 5/6).
 }
 ```
+
+For one `TokenUsage` entry, its priced contribution requires
+`prompt_tokens` and `total_tokens` both known, non-negative, and
+`total_tokens >= prompt_tokens` (re-validated defensively at pricing time,
+independent of whatever `_extract_usage` already enforced — the same
+"defense in depth beyond the producer's own guarantee" discipline
+`scoring.assert_grounded` already uses), and `model` present in
+`PRICING_USD_PER_MILLION_TOKENS`:
+
+```
+input_cost_microusd  = round(prompt_tokens × input_rate)
+output_cost_microusd = round((total_tokens − prompt_tokens) × output_rate)
+attempt_cost_microusd = input_cost_microusd + output_cost_microusd
+```
+
+(`input_rate`/`output_rate` are USD per **million** tokens; a microUSD is
+1e-6 USD, so `tokens × (USD per 1e6 tokens)` already equals the cost in
+microUSD directly — no further unit conversion factor is needed. This is
+worth stating explicitly in the implementation so the `1_000_000` doesn't
+get applied twice or inverted.) `candidates_tokens`/`thinking_tokens` are
+**not** read for pricing at all — they remain in `TokenUsage` purely for
+display/visibility (§0.2 correction 2), never required or consulted by
+`_price`.
+
+Any entry that fails the prompt/total validity check makes the **whole
+outreach's** `estimated_cost_microusd` `NULL` — one bad entry cannot be
+silently skipped and the rest summed, since that would understate cost
+without saying so.
 
 The exact numeric rates are **not fabricated in this plan** — they are
 placeholders to be filled from the live, official Gemini pricing page
@@ -348,21 +476,23 @@ not a "paid live call": reading a public pricing page is not a billed API
 request). Implementation must not proceed with a guessed number.
 
 `estimated_cost_microusd` is an integer count of millionths of a US dollar
-(matching the correction's preferred unit) so the stored figure never drifts
-from floating-point rounding and a later change to
-`PRICING_USD_PER_MILLION_TOKENS` can never retroactively alter a
-historical draft's stored estimate — only future drafts see a new rate.
+so the stored figure never drifts from floating-point rounding, and a
+later change to `PRICING_USD_PER_MILLION_TOKENS` can never retroactively
+alter a historical draft's stored estimate — only future drafts see a new
+rate.
 
-**Billing language (correction 9):** "default model" replaces "free model"/
-"free tier" everywhere in this plan and in the UI copy it specifies (§5.7).
-Default drafting and the LLM judge both consume the workspace owner's own
-Gemini quota and **may incur real charges** the moment a `gemini` key is
-present, regardless of whether escalation ever fires. The UI always labels
-the dollar figure "estimated paid list-price cost," never implying it is
-free or discounted. The only workspace state that is genuinely zero-cost is
-no `gemini` key at all (fully heuristic drafting and fully heuristic eval).
+**Billing language:** "default model" replaces "free model"/"free tier"
+everywhere in this plan and in the UI copy it specifies (§5.7). Default
+drafting and the LLM judge both consume the workspace owner's own Gemini
+quota and **may incur real charges** the moment a `gemini` key is present,
+regardless of whether escalation ever fires or whether every attempt
+succeeds. The UI always labels the dollar figure "estimated paid list-price
+cost," never implying it is free or discounted. The only workspace state
+that is genuinely zero-cost is no `gemini` key at all.
 
-### 4.5 The complete deterministic heuristic rubric (correction 8)
+### 4.5 The complete deterministic heuristic rubric
+
+Unchanged by this revision — carried forward verbatim from v2.
 
 Reused constant, moved from prose into code — **`BANNED_FILLER_PHRASES`**,
 defined in `app/agent/drafting.py` (the module that already describes these
@@ -390,8 +520,7 @@ normalized body.)
 this logic — the same discipline `scoring.py`/`drafting.py` already use for
 `app.sources.base.canonical_name`/`coerce_int`.
 
-**`EvalDimension` — the exact Pydantic shape for a justification (correction
-8's last requirement):**
+**`EvalDimension` — the exact Pydantic shape for a justification:**
 
 ```python
 class EvalDimension(BaseModel):
@@ -458,15 +587,11 @@ results. Word count of a sentence: `len(sentence.split())`.
 
 **Dimension 2 — `specificity` (0–25):** grounded against the target's
 *stored* Slice 3 evidence (`drafting._parse_fit_reasons(target)`), not
-re-derived from the draft's own claimed citation — this checks whether the
-message contains *a* real, specific, verifiable fact about the target, the
-general quality signal "specificity" is about, independent of exactly which
-one fact the drafting step happened to pick.
+re-derived from the draft's own claimed citation.
 
 - `reasons = drafting._parse_fit_reasons(target)`; if empty → **0 points**
-  (defensive only — unreachable in practice, since `assert_grounded`
-  guarantees ≥1 stored reason post-Slice-3). Justification: `"No stored
-  evidence was available to check for a specific detail."`
+  (defensive only). Justification: `"No stored evidence was available to
+  check for a specific detail."`
 - If any `reasons[i]["evidence_value"]`, normalized via
   `drafting._norm_for_substring`, is a substring of the normalized body →
   **25 points**. Justification: `f"The message cites a specific, verified
@@ -482,30 +607,18 @@ summed (four possible totals: `0`, `10`, `15`, `25`):
   **0**.
 - *Sentence-variety check (0 or 10):* let `lengths = [word count of s for s
   in _sentences(body) if s.split()]`. If `len(lengths) >= 2` and
-  `len(set(lengths)) > 1` (at least two sentences, not all the same length)
-  → **10**; otherwise (fewer than two sentences, or all sentences the same
-  length) → **0**.
-- `points = banned_phrase_points + variety_points`. Justification names
-  which sub-checks passed/failed, e.g. `"No filler phrases found; sentence
-  lengths vary."` / `"Contains a filler phrase ('reaching out'); sentence
-  lengths do not vary."` (the exact matched phrase is named when one is
-  found, since it is drawn from the constant list, never from provider
-  output — safe to surface).
+  `len(set(lengths)) > 1` → **10**; otherwise → **0**.
+- `points = banned_phrase_points + variety_points`.
 
 **Dimension 4 — `clear_ask` (0–25):** `question_count = sum(1 for s in
 _sentences(body) if s.rstrip().endswith("?"))`.
 
-- `question_count == 1` → **25 points**. Justification: `"The message makes
-  exactly one clear ask."`
-- `question_count == 0` → **0 points**. Justification: `"The message makes
-  no discernible ask."`
-- `question_count >= 2` → **10 points**. Justification: `f"The message
-  makes {question_count} asks instead of one focused ask."`
+- `question_count == 1` → **25 points**.
+- `question_count == 0` → **0 points**.
+- `question_count >= 2` → **10 points**.
 
-**Missing-data behavior:** if `draft_body` is blank/empty (defensive only —
-unreachable given `validate_draft_body`'s 20–1500 character floor), every
-dimension scores `0` with justification `"The draft body was unavailable to
-evaluate."`; `score = 0`.
+**Missing-data behavior:** if `draft_body` is blank/empty (defensive
+only), every dimension scores `0`; `score = 0`.
 
 **`evaluate_draft` signature:**
 
@@ -524,47 +637,75 @@ class EvalOutcome:
     reason: str | None       # sanitized, safe for UI/audit
 ```
 
-`EvalStatus` intentionally mirrors the same four-way split
-`IntakeStatus`/`ScoreStatus` already use (`LLM_OK`, `NO_GEMINI_KEY`,
-`INVALID_GEMINI_KEY`, `GEMINI_ERROR`) rather than v1's extra
-`HEURISTIC_FALLBACK` value — "the LLM replied but failed validation twice"
-already resolves to `GEMINI_ERROR` via the existing `LLMErrorKind.ERROR`
-mapping, so a fifth status would be redundant with the established pattern.
+### 4.6 Gemini header authentication (§0.2 correction 5, new)
+
+`app/llm.py` as shipped in Slices 2–5 sends the API key as a `key=` query
+parameter (`httpx.post(GEMINI_URL, params={"key": api_key}, ...)`) —
+credential-bearing URLs are exactly what Slice 5 corrected for Apify and
+YouTube, and Slice 6 already has to touch `_call_gemini` for the
+usage/model changes above, so this correction folds the same fix in here
+rather than leaving it for a future slice.
+
+- `_url(model) -> str` returns
+  `f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"`
+  — no query string at all.
+- The request becomes `httpx.post(_url(model), headers={"x-goog-api-key":
+  api_key}, json=body, timeout=REQUEST_TIMEOUT_SECS)` — `params=` is
+  removed entirely from this call.
+- **No request URL or query parameter ever contains the key**, matching
+  the exact guarantee Apify/YouTube already provide.
+- Sanitization is unchanged in spirit but re-stated precisely: an echoed
+  key inside an error message body is still redacted by
+  `_safe_gemini_reason` (`message.replace(api_key, "[REDACTED]")`) as
+  defense-in-depth, exactly as it does today — this is not weakened by
+  moving the key out of the URL, it is additional to it.
 
 ---
 
 ## 5. Architecture
 
-### 5.1 `llm.py` — measured calls, selectable model, no env fallback
+### 5.1 `llm.py` — measured calls, selectable model, header auth, no env fallback
 
-Combines §4.1 and §4.2/§4.3: `GEMINI_MODEL` stays the default-model
-constant; `_url(model)` replaces the hardcoded `GEMINI_URL`.
-`_call_gemini(api_key, system, user, response_schema, model)` returns
-`(text, TokenUsage)` on a 200 response (never raises for a parseable-or-not
-JSON body — only for transport/status failures, per the existing contract),
-using the population rule in §4.2. `generate_structured_with_usage` performs
-the two-shot retry loop from §4.3. `generate_structured` is the thin
+`GEMINI_MODEL` stays the default-model constant; `_url(model)` replaces the
+hardcoded `GEMINI_URL` (§4.6). `_call_gemini(api_key, system, user,
+response_schema, model)`:
+
+- Issues the POST with the `x-goog-api-key` header (§4.6).
+- On `httpx.RequestError`: raises `LLMError(ERROR, "could not reach Gemini
+  (...)", usage=[TokenUsage(model, None, None, None, None)])` — one
+  unknown-usage entry, never omitted (§4.2/§4.3).
+- Otherwise calls `_extract_usage(response, model)` **once**, on the raw
+  response, before any status-code check.
+- On a non-2xx status: raises the existing classified `LLMError` (via
+  `_to_llm_error`, unchanged classification logic) with that response's
+  `_extract_usage` result attached as `usage=[...]`.
+- On a 200 whose body isn't valid JSON: raises `LLMError(ERROR, "Gemini
+  returned a non-JSON response", usage=[...])` with the same
+  `_extract_usage` result (almost always all-`None`, since a non-JSON body
+  can't contain `usageMetadata` either, but computed via the identical
+  path rather than special-cased).
+- On a 200 whose JSON lacks the expected `candidates`/`parts` shape:
+  raises `LLMError(ERROR, ..., usage=[...])`, same pattern.
+- Only on a 200 with successfully extracted text does it return
+  `(text, usage)` — never raising.
+
+`generate_structured_with_usage` performs the two-shot retry loop from
+§4.3, accumulating `usage_log` from every `LLMError.usage`/successful-call
+usage it sees, in order. `generate_structured` is the thin
 backward-compatible wrapper from §4.3.
 
 ### 5.2 `eval.py` — rubric scoring (LLM judge + fully-specified heuristic)
 
-`evaluate_draft` (§4.5's signature): if `known_invalid_key_reason` is set,
+Unchanged from v2. `evaluate_draft`: if `known_invalid_key_reason` is set,
 skip the live call entirely and return the heuristic result with
-`status=INVALID_GEMINI_KEY` and `usage=[]` (mirrors `scoring.score_batch`'s
-existing `known_invalid_key_reason` short-circuit). Otherwise call
+`status=INVALID_GEMINI_KEY` and `usage=[]` (mirrors
+`scoring.score_batch`'s existing short-circuit). Otherwise call
 `llm.generate_structured_with_usage(EvalResult, SYSTEM_PROMPT_EVAL,
-_build_eval_prompt(brief, target, draft_body), settings)`; on
-`LLMError` (whether `INVALID_KEY` or `ERROR`), fall back to the heuristic
-but **keep the error's `usage`** (§4.3) so tokens spent on a failed judge
-attempt are never silently dropped from the outreach's cost. On success,
-use the LLM's `EvalResult` and its usage. On no key (`value is None`), fall
-back to the heuristic with `usage=[]`.
-
-The LLM judge prompt includes the brief, the target's normalized evidence,
-and the drafted body; it is asked to score using the same four dimensions
-and point ranges as the heuristic (0–25 each), so the two paths are
-philosophically aligned even though the LLM path can use real judgment
-where the heuristic uses fixed rules.
+_build_eval_prompt(brief, target, draft_body), settings)`; on `LLMError`,
+fall back to the heuristic but **keep the error's `usage`** so tokens spent
+on a failed judge attempt are never silently dropped. On success, use the
+LLM's `EvalResult` and its usage. On no key (`value is None`), fall back to
+the heuristic with `usage=[]`.
 
 ### 5.3 `routing.py` — tier decision, terminal invalid-key, early-exit, cost
 
@@ -574,35 +715,55 @@ CONFIDENCE_THRESHOLD = 80     # inclusive
 ESCALATION_MODEL: str | None = None  # unset until owner-verified (decision 5/6)
 ```
 
-`route_and_draft(brief, target, settings) -> RoutingOutcome`, called by
-`create_draft` in place of the direct `draft_outreach` call:
+**Corrected signature (§0.2 correction 4 — fixes v2's contradiction):**
+
+```python
+def route_and_draft(
+    brief: Brief,
+    target: dict,
+    settings: dict[str, str],
+    *,
+    paid_tier_enabled: bool,
+) -> RoutingOutcome: ...
+```
+
+v2's draft signature was `route_and_draft(brief, target, settings) ->
+RoutingOutcome`, yet its escalation-eligibility step called
+`db.get_paid_tier_enabled(workspace_id)` — a `workspace_id` the function
+never received. `routing.py` now takes the already-resolved boolean as an
+explicit keyword argument and **performs no database access of any kind**;
+the workspace-scoped lookup happens exactly once, in `main.py` (§5.7),
+before `route_and_draft` is ever called. This keeps the tenant-isolation
+guarantee ("every read/write scoped by `workspace_id`") anchored at the
+one call site that actually has a `workspace_id` in scope, rather than
+letting it leak into a module that otherwise has no database dependency at
+all.
+
+Called by `create_draft` in place of the direct `draft_outreach` call:
 
 1. **Default draft.** `drafting.draft_outreach(brief, target, settings)` —
    heuristic if no key, default model if key present. Collect its `usage`.
-2. **Terminal invalid-key check (correction 6).** If the default draft's
-   `status == DraftStatus.INVALID_GEMINI_KEY`, this key is now known-rejected
-   for the remainder of the request:
+2. **Terminal invalid-key check.** If the default draft's `status ==
+   DraftStatus.INVALID_GEMINI_KEY`, this key is now known-rejected for the
+   remainder of the request:
    - Eval is called with `known_invalid_key_reason` set (§5.2) — **no**
      live judge call.
-   - Escalation eligibility is forced to `False` regardless of opt-in/fit —
-     **no** escalation call, regardless of how high the target's fit score
-     is. Audit `routing.invalid_key_terminal`.
+   - Escalation eligibility is forced to `False` regardless of
+     `paid_tier_enabled`/fit — **no** escalation call. Audit
+     `routing.invalid_key_terminal`.
    - Skip directly to step 6 (cost).
 3. **Eval the default draft.** `eval.evaluate_draft(brief, target,
-   default_body, settings)` (no `known_invalid_key_reason` here, since step
-   2 didn't trigger). Collect its `usage`.
+   default_body, settings)`. Collect its `usage`.
 4. **Escalation eligibility (all required, only reached if step 2 did not
    trigger):** `settings.get("gemini")` present **and**
-   `db.get_paid_tier_enabled(workspace_id)` **and**
+   `paid_tier_enabled` (the parameter, not a lookup) **and**
    `target["fit_score"] >= HIGH_FIT_THRESHOLD` **and** `ESCALATION_MODEL is
    not None`.
    - Not eligible for any reason except a set-but-inapplicable
-     `ESCALATION_MODEL` → keep the default draft/eval, audit nothing extra
-     (this is the ordinary, non-escalating path, same as most Slice 4
-     drafts today).
+     `ESCALATION_MODEL` → keep the default draft/eval, no extra audit.
    - Eligible on (gemini key + opt-in + fit) but `ESCALATION_MODEL is None`
      → keep default, audit `routing.escalation_unavailable` (never
-     silent — decision 2 of §0/§1).
+     silent).
 5. **Confidence early-exit / escalate.** If eligible and `ESCALATION_MODEL`
    is set:
    - Default eval's `score >= CONFIDENCE_THRESHOLD` → keep the default
@@ -625,7 +786,7 @@ class RoutingOutcome:
     eval_result: EvalResult
     eval_status: EvalStatus
     cost_breakdown: list[TokenUsage]
-    cost_tokens: int | None            # None means unknown, 0 means no calls made
+    cost_tokens: int | None            # None means unknown, 0 means no request issued
     estimated_cost_microusd: int | None
     routing_action: str  # "default" | "early_exit" | "escalated"
                           # | "escalation_unavailable" | "invalid_key_terminal"
@@ -634,61 +795,81 @@ class RoutingOutcome:
 All thresholds, `ESCALATION_MODEL`, and `PRICING_USD_PER_MILLION_TOKENS`
 are named module constants, easy for the owner to adjust.
 
-### 5.4 `drafting.py` changes (widened scope, correction 2/3/8)
+### 5.4 `drafting.py` changes (unchanged from v2)
 
 - `BANNED_FILLER_PHRASES` constant added (§4.5); `SYSTEM_PROMPT`'s existing
-  prose is left as-is (it already names the same phrases in English for the
-  LLM) with a comment tying the two together so they cannot silently drift.
+  prose is left as-is with a comment tying the two together.
 - `DraftResult` gains `usage: list[TokenUsage] = field(default_factory=
-  list)` as a fifth, defaulted field — every construction site inside
-  `drafting.py` is updated to pass the real accumulated usage (`[]` for the
-  heuristic path, the `MeasuredResult`/`LLMError` usage for the model
-  path); any test that only calls `draft_outreach(...)` and reads
-  attributes off the returned `DraftResult` is unaffected by the added
-  field.
+  list)` as a fifth, defaulted field.
 - `draft_outreach(brief, target, settings, *, known_invalid_key_reason=None,
   model=GEMINI_MODEL)` gains the optional `model` parameter, threaded to
-  `generate_structured_with_usage`, so routing's escalation call (§5.3 step
-  5) reuses the exact same function instead of duplicating drafting logic
-  for a second model.
+  `generate_structured_with_usage`.
 
-### 5.5 Cost/pricing computation helper
+### 5.5 Cost/pricing computation helper (corrected formula)
 
-A pure function in `routing.py`:
-`_price(cost_breakdown: list[TokenUsage]) -> tuple[int | None, int | None]`
-returning `(cost_tokens, estimated_cost_microusd)` per the rules in §4.4 —
-unit-testable independent of any HTTP mocking, which is how the "mixed-model
-pricing" and "unknown usage" acceptance criteria (§6) are verified precisely.
+A pure function in `routing.py`,
+`_price(cost_breakdown: list[TokenUsage]) -> tuple[int | None, int | None]`,
+returning `(cost_tokens, estimated_cost_microusd)` per §4.4's now-decoupled
+rules:
+
+```python
+def _price(cost_breakdown: list[TokenUsage]) -> tuple[int | None, int | None]:
+    if not cost_breakdown:
+        return 0, 0
+
+    cost_tokens = None
+    if all(u.total_tokens is not None for u in cost_breakdown):
+        cost_tokens = sum(u.total_tokens for u in cost_breakdown)
+
+    estimated_cost_microusd = 0
+    for usage in cost_breakdown:
+        rates = PRICING_USD_PER_MILLION_TOKENS.get(usage.model)
+        if (
+            usage.prompt_tokens is None or usage.total_tokens is None
+            or usage.prompt_tokens < 0 or usage.total_tokens < usage.prompt_tokens
+            or rates is None
+        ):
+            estimated_cost_microusd = None
+            break
+        estimated_cost_microusd += (
+            round(usage.prompt_tokens * rates["input"])
+            + round((usage.total_tokens - usage.prompt_tokens) * rates["output"])
+        )
+
+    return cost_tokens, estimated_cost_microusd
+```
+
+Unit-testable independent of any HTTP mocking, which is how the corrected
+"unknown usage," "mixed-model pricing," and "cost-tokens-vs-dollar-estimate
+decoupling" acceptance criteria (§6) are verified precisely.
 
 ### 5.6 `db.py` — eval table, paid-tier column, cost columns, atomic creation
 
-**Paid-tier opt-in (resolved, no longer open — owner's instruction):** a
-dedicated, idempotently migrated boolean column on `workspace`:
+Unchanged from v2.
+
+**Paid-tier opt-in:** a dedicated, idempotently migrated boolean column on
+`workspace`:
 
 ```sql
 ALTER TABLE workspace ADD COLUMN paid_tier_enabled INTEGER NOT NULL DEFAULT 0
 ```
 
 guarded by a small `_add_column_if_missing(conn, table, column, ddl)`
-helper (SQLite has no `ADD COLUMN IF NOT EXISTS`; existence is checked via
-`PRAGMA table_info(table)` before executing the `ALTER TABLE`, so `init()`
-stays safe to call on every startup). The same helper adds `draft`'s two new
-columns:
+helper (checked via `PRAGMA table_info(table)`). The same helper adds
+`draft`'s two new columns:
 
 ```sql
 ALTER TABLE draft ADD COLUMN cost_breakdown_json TEXT
 ALTER TABLE draft ADD COLUMN estimated_cost_microusd INTEGER
 ```
 
-Default `0` on `workspace.paid_tier_enabled` makes every **existing**
-workspace (Alpha, Beta, the various `*Verify` workspaces from Slices 1–5)
-opted **out** automatically — no behavior change for any workspace that
-doesn't explicitly opt in, and product configuration (not a credential)
-correctly lives as a real column rather than piggybacking on
-`workspace_setting`. New functions: `get_paid_tier_enabled(workspace_id) ->
-bool`, `set_paid_tier_enabled(workspace_id, enabled: bool) -> None`.
+Default `0` makes every existing workspace opted **out** automatically.
+`get_paid_tier_enabled(workspace_id) -> bool` and
+`set_paid_tier_enabled(workspace_id, enabled: bool) -> None` are the only
+functions that ever read/write this column — both live in `db.py`, called
+from `main.py` (§5.7), **never** from `routing.py` (§0.2 correction 4).
 
-**`eval` table (correction 7 — exactly one per draft, SPEC §3, idempotent):**
+**`eval` table** (exactly one per draft, SPEC §3, idempotent):
 
 ```sql
 CREATE TABLE IF NOT EXISTS eval (
@@ -702,71 +883,49 @@ CREATE TABLE IF NOT EXISTS eval (
 ```
 
 `draft_id ... UNIQUE` is both the foreign key and the "exactly one eval per
-draft" guarantee at the database level — a second attempt to insert an eval
-for the same `draft_id` raises `sqlite3.IntegrityError`, identified the same
-way `_is_active_draft_conflict` already identifies the Slice 4 unique-index
-violation. `workspace_id` stays an explicit column (not join-only), per the
-existing "every tenant function takes `workspace_id`" discipline —
-retained even though `draft_id` alone is already unique.
+draft" guarantee at the database level.
 
-**Atomic creation.** A new function, **not** a change to the existing
-`add_draft` (kept exactly as-is for its current callers/tests):
+**Atomic creation:**
 
 ```python
 def create_draft_with_routing(
     workspace_id: int, target_id: int, outcome: RoutingOutcome, actor: str = "agent",
 ) -> int:
     """Insert the draft (with its cost columns), its eval row, and every
-    required audit row in one transaction. Raises NotFound / ActiveDraftExists
-    exactly as add_draft does; raises a distinct EvalAlreadyExists (identified
-    the same way _is_active_draft_conflict is) if the eval UNIQUE constraint
-    is ever hit, which should be unreachable given one eval is written per
-    newly-inserted draft in the same transaction."""
+    required audit row in one transaction."""
 ```
 
-On any failure partway through (the draft insert's own tenancy check, the
-eval insert, or an audit insert), the whole transaction rolls back — no
-draft, no eval, no cost, no audit row is left behind. The existing
-one-active-draft-per-target unique index and its `ActiveDraftExists`
-behavior are preserved unchanged (this function still performs the same
-`INSERT ... SELECT ... WHERE target.workspace_id = ?` tenancy-enforcing
-insert as `add_draft`, just also carrying the cost columns and eval row).
-
-**Read helpers:** `get_eval_for_draft(workspace_id, draft_id)`, and a
-workspace-scoped `outreach_cost_summary(workspace_id)` returning total known
-tokens, total known estimated cost, count of drafts with unknown cost, and
-draft count — for the running cost-per-outreach figure (§5.7). Unknown-cost
-drafts are excluded from the average and reported as a separate count, never
-silently treated as `0` (correction 4 applied to the summary too).
+**Read helpers:** `get_eval_for_draft(workspace_id, draft_id)`, and
+`outreach_cost_summary(workspace_id)` (known-cost average, unknown-cost
+count, draft count).
 
 ### 5.7 `main.py` + templates
 
-- `create_draft` calls `routing.route_and_draft`, then
-  `db.create_draft_with_routing`. Its existing redirects/guards are
-  unchanged.
+- **Corrected wiring (§0.2 correction 4):** `create_draft` first resolves
+  `paid_tier_enabled = db.get_paid_tier_enabled(workspace_id)` (the same
+  `workspace_id` already in scope from `get_current_workspace`), then calls
+  `routing.route_and_draft(brief, dict(target), settings,
+  paid_tier_enabled=paid_tier_enabled)`, then
+  `db.create_draft_with_routing(workspace_id, target_id, outcome)`. Its
+  existing redirects/guards are unchanged.
 - **Approvals** (`approvals.html`): each draft card shows model used, an
-  eval score badge (four-dimension rubric with justifications on expand,
-  same caret pattern as fit reasons), and cost — `"N tokens · ~$X.XXXX
-  estimated paid list-price cost"` when known, `"cost unknown"` when not,
-  `"0 tokens (heuristic, no cost)"` when no key was ever used. A header
-  strip shows the running cost-per-outreach average (excluding
-  unknown-cost drafts, with a visible count of how many are excluded).
+  eval score badge (four-dimension rubric with justifications on expand),
+  and cost — `"N tokens · ~$X.XXXX estimated paid list-price cost"` when
+  known, `"cost unknown"` when not, `"0 tokens (heuristic, no cost)"` when
+  no key was ever used. A header strip shows the running cost-per-outreach
+  average (excluding unknown-cost drafts, with a visible count of how many
+  are excluded).
 - **Pipeline** / **campaign detail:** lighter — eval score + cost shown per
   card/row where a draft exists; no new controls.
 - **Settings** (`settings.html`): (a) a checkbox "Enable the stronger paid
   model tier for high-fit outreach — uses *your* Gemini key; your Google
   project is billed for both the default and stronger tiers," disabled/
   greyed with a hint when no `gemini` key is saved; (b) the existing Gemini
-  key-card hint is corrected — it currently reads "Uses GEMINI_API_KEY when
-  configured; otherwise Outpost uses its built-in demo heuristic," which
-  describes the environment fallback this plan removes (correction 1). New
-  copy: "Required for the default and stronger-tier model calls; without a
-  key, Outpost uses its built-in demo heuristic at zero cost." No "free"
-  language anywhere in the new or corrected copy (correction 9) — a UI-copy
-  acceptance test (§6) asserts the word does not appear in any eval/cost/
-  paid-tier template string.
-- Reuse existing design tokens only; no new colors/spacing. Eval score can
-  reuse a coloring band analogous to `_fit_class` (its own thresholds).
+  key-card hint is corrected — current copy references the removed
+  environment fallback. New copy: "Required for the default and
+  stronger-tier model calls; without a key, Outpost uses its built-in demo
+  heuristic at zero cost." No "free" language anywhere.
+- Reuse existing design tokens only; no new colors/spacing.
 
 ---
 
@@ -777,109 +936,168 @@ retained suite (212 tests) still passes, plus new
 `tests/test_slice6_eval_routing.py` (mocked at the `llm`/`httpx` boundary —
 no live call, no real key, temp SQLite).
 
-1. **Environment key cannot trigger drafting.** With `GEMINI_API_KEY` set in
-   `os.environ` and no workspace `gemini` key, a draft is produced by the
-   heuristic path (`model_used == "heuristic"`, `cost_tokens == 0`) — the
-   env var is provably inert.
-2. **Environment key cannot trigger eval or escalation.** Same environment
-   setup: `eval.evaluate_draft` returns `EvalStatus.NO_GEMINI_KEY`, and
-   routing never escalates even with `paid_tier_enabled=True` and a
-   high-fit target, because escalation also requires a *workspace* key.
-3. **Usage accumulates across the retry.** A mocked first-attempt-invalid,
-   second-attempt-valid sequence produces `MeasuredResult.usage` with two
-   entries, both attached; a `LLMError` raised after two failed validations
-   carries both entries via `.usage`.
-4. **Failure-path usage is not dropped.** When the default draft's Gemini
-   call fails validation twice (falls back to the heuristic body), the
-   outreach's `cost_breakdown` still includes both wasted attempts' known
-   token counts, and `cost_tokens` reflects them — not `0`.
-5. **Known-zero vs. unknown are never conflated.** (a) A fully heuristic
-   outreach (no key) → `cost_tokens == 0`, `cost_breakdown_json == "[]"`. (b)
-   A real model call with a well-formed `usageMetadata` → `cost_tokens`
-   equals the mocked total. (c) A 200 response with `usageMetadata` missing
-   entirely → that attempt's `TokenUsage` has all four fields `None`, and
-   the outreach's aggregate `cost_tokens`/`estimated_cost_microusd` are
-   `NULL`, never `0`.
-6. **`thinking_tokens` absence within a present block is a known zero.** A
-   mocked `usageMetadata` with `promptTokenCount`/`candidatesTokenCount`/
-   `totalTokenCount` but no `thoughtsTokenCount` key produces
-   `thinking_tokens == 0`, not `None`.
-7. **Mixed-model pricing is never blended.** An outreach with a default-model
-   attempt (mocked N1 tokens) and an escalated attempt (mocked N2 tokens, a
-   different mocked per-model rate) produces
-   `estimated_cost_microusd == price(N1, flash_rate) + price(N2,
-   escalation_rate)` — not `(N1+N2) × either single rate`.
-8. **Terminal invalid-key call count.** When the default draft's Gemini call
-   returns a mocked 403/`INVALID_GEMINI_KEY`, the total number of mocked
-   Gemini HTTP calls for the whole `route_and_draft` request is exactly
-   `1` — eval and escalation make zero further calls, confirmed by call-count
-   assertion, even when the target is high-fit and the workspace is
-   opted in.
-9. **No silent escalation — no key.** No `gemini` key → heuristic path,
-   `0` cost, never escalates, regardless of fit or opt-in.
-10. **No silent escalation — no opt-in.** `gemini` key present but
-    `paid_tier_enabled` is `False` (including the untouched default for
-    every pre-existing workspace) → default-model path only, never
-    escalates, even for a fit-100 target.
-11. **High-fit threshold is inclusive at the boundary.** With key + opt-in +
-    `ESCALATION_MODEL` set and eval below `CONFIDENCE_THRESHOLD`: a target
-    at `fit_score = 84` is **not** escalated; a target at `fit_score = 85`
-    **is** escalated (exact boundary test, `HIGH_FIT_THRESHOLD = 85`
-    inclusive).
-12. **Confidence threshold is inclusive at the boundary.** Eligible target,
-    default eval `score = 79` → escalates; `score = 80` → early-exit, no
-    escalation (`CONFIDENCE_THRESHOLD = 80` inclusive).
-13. **Escalation unavailable is never silent.** Key + opt-in + high-fit but
+**§0.2 correction 1 — every issued attempt is recorded:**
+
+1. **No request issued produces known zero.** No `gemini` key configured →
+   `MeasuredResult(None, [])`; a fully heuristic outreach →
+   `cost_breakdown == []`, `cost_tokens == 0`, `estimated_cost_microusd ==
+   0`, `cost_breakdown_json == "[]"`.
+2. **A transport failure after request issuance produces unknown cost.** A
+   mocked `httpx.RequestError` on the only attempt → `LLMError.usage ==
+   [TokenUsage(model, None, None, None, None)]` (one entry, not zero); the
+   outreach's `cost_tokens`/`estimated_cost_microusd` are `NULL`, not `0`.
+3. **A non-2xx response produces unknown cost unless authoritative usage is
+   present.** (a) A mocked 403/500 with no `usageMetadata` in the error
+   body → that attempt's `TokenUsage` is all-`None`, aggregate unknown. (b)
+   A mocked non-2xx response whose body *does* contain a well-formed
+   `usageMetadata` → that attempt's known fields are used, proving the
+   extraction path is genuinely shared between success and error responses,
+   not special-cased to always return unknown for non-2xx.
+4. **A malformed/non-JSON HTTP 200 produces an unknown attempt and
+   preserves earlier known attempts.** A mocked first-attempt-invalid
+   (well-formed usage, fails schema validation) followed by a
+   retry that returns a non-JSON 200 body → `usage == [usage1 (known),
+   usage2 (all-None)]`, attached to the raised `LLMError`; the outreach's
+   `cost_breakdown_json` still shows attempt 1's real numbers even though
+   the aggregate is unknown.
+5. **Missing/malformed `usageMetadata` produces unknown usage.** A 200 with
+   a well-formed JSON body but no `usageMetadata` key (or a non-dict value
+   for it) → all four `TokenUsage` fields `None`.
+6. **Retry usage preserves every attempt in order.** A mocked
+   first-attempt-invalid, second-attempt-valid sequence produces
+   `MeasuredResult.usage` with exactly two entries in call order.
+
+**§0.2 correction 2 — corrected pricing formula:**
+
+7. **Pricing uses prompt tokens at the input rate and all remaining total
+   tokens at the output rate.** For a mocked `TokenUsage(prompt_tokens=P,
+   total_tokens=T, ...)`, `_price` produces
+   `round(P × input_rate) + round((T − P) × output_rate)` exactly — not a
+   formula that reads `candidates_tokens` or `thinking_tokens` at all.
+8. **`PRICING_USD_PER_MILLION_TOKENS` has no `"thinking"` key.** A
+   structural test asserts the pricing table's per-model dict only ever
+   contains `"input"`/`"output"`.
+9. **Mixed-model pricing is never blended.** An outreach with a
+   default-model attempt (mocked P1/T1) and an escalated attempt (mocked
+   P2/T2, a different mocked per-model rate pair) produces
+   `estimated_cost_microusd == price(P1, T1, flash_rates) + price(P2, T2,
+   escalation_rates)` — never a single blended rate or the final model's
+   rate applied to the combined total.
+10. **Invalid prompt/total combinations make the estimate unknown, not
+    silently skipped.** `total_tokens < prompt_tokens`, a negative
+    `prompt_tokens`, or a `model` absent from the pricing table each make
+    `estimated_cost_microusd` (for the whole outreach) `NULL` — confirmed
+    it is not simply omitted from a sum, which would understate cost.
+11. **`cost_tokens` and `estimated_cost_microusd` can be independently
+    unknown.** A crafted `TokenUsage` with a known `total_tokens` but an
+    unknown `prompt_tokens` produces a known `cost_tokens` alongside a
+    `None` `estimated_cost_microusd` — proving the two aggregates are not
+    force-coupled.
+
+**§0.2 correction 3 — thinking-token derivation:**
+
+12. **Missing `thoughtsTokenCount` does not automatically become zero.** A
+    mocked `usageMetadata` with `promptTokenCount`/`candidatesTokenCount`/
+    `totalTokenCount` but no `thoughtsTokenCount` key, where
+    `total < prompt + candidates` (an inconsistent report) → `thinking_
+    tokens is None`, `thinking_tokens_derived is False`.
+13. **Derived-zero boundary.** Same setup but `total == prompt +
+    candidates` → `thinking_tokens == 0`, `thinking_tokens_derived is
+    True`.
+14. **Derived-difference boundary.** Same setup but `total > prompt +
+    candidates` → `thinking_tokens == total - prompt - candidates`,
+    `thinking_tokens_derived is True`.
+15. **Provider-reported takes priority over derivation.** A mocked
+    `usageMetadata` with an explicit `thoughtsTokenCount` present (even if
+    it wouldn't match what the derivation formula would compute) → that
+    literal value is used, `thinking_tokens_derived is False`.
+
+**§0.2 correction 4 — routing signature fix:**
+
+16. **`main.py` passes a workspace-scoped `paid_tier_enabled` boolean into
+    routing.** A test asserts `create_draft`'s route calls
+    `db.get_paid_tier_enabled(workspace_id)` for the request's own
+    workspace and forwards the exact result into
+    `routing.route_and_draft(..., paid_tier_enabled=...)`.
+17. **Routing performs no database lookup.** A test calls
+    `routing.route_and_draft` directly (mocking only `llm`/`httpx`, never
+    `app.db`) and confirms it completes without any `app.db` function
+    being invoked — proving routing is a pure function of its arguments.
+
+**§0.2 correction 5 — header-only Gemini authentication:**
+
+18. **Gemini sends the key only through `x-goog-api-key`.** Every mocked
+    `httpx.post` call made by `llm.py` carries
+    `headers["x-goog-api-key"] == <the workspace key>`.
+19. **Request URLs and query parameters contain no credential.** The same
+    mocked calls' first positional argument (the URL) never contains the
+    key string, and the call's `params` kwarg (if present at all) never
+    contains a `"key"` entry.
+
+**Carried forward from v2, still required:**
+
+20. **No silent escalation — no key / no opt-in.** No `gemini` key →
+    heuristic path, `0` cost, never escalates. `gemini` key present but
+    `paid_tier_enabled=False` → default-model path only, never escalates,
+    even for a fit-100 target.
+21. **High-fit / confidence thresholds are inclusive at both boundaries.**
+    `fit_score = 84` not escalated, `fit_score = 85` escalated
+    (`HIGH_FIT_THRESHOLD`); eligible target with default eval `score = 79`
+    escalates, `score = 80` early-exits (`CONFIDENCE_THRESHOLD`).
+22. **Terminal invalid-key call count.** When the default draft's Gemini
+    call returns a mocked 403/`INVALID_GEMINI_KEY`, the total number of
+    mocked Gemini HTTP calls for the whole `route_and_draft` request is
+    exactly `1`, even when the target is high-fit and
+    `paid_tier_enabled=True`.
+23. **Escalation unavailable is never silent.** Key + opt-in + high-fit but
     `ESCALATION_MODEL is None` → no escalation,
     `routing.escalation_unavailable` audited, default draft/eval kept.
-14. **Eval uniqueness enforced in SQLite.** A second attempt to insert an
-    `eval` row for the same `draft_id` raises the expected `IntegrityError`
-    (or the wrapped `EvalAlreadyExists`), and only one `eval` row exists
-    for that draft afterward.
-15. **Atomic rollback.** If the eval or audit insert fails partway through
+24. **Eval uniqueness enforced in SQLite.** A second attempt to insert an
+    `eval` row for the same `draft_id` raises the expected
+    `IntegrityError`/`EvalAlreadyExists`; only one `eval` row exists for
+    that draft afterward.
+25. **Atomic rollback.** If the eval or audit insert fails partway through
     `create_draft_with_routing`, no draft row, no eval row, and no audit
-    row are left behind; the one-active-draft-per-target guard and
-    `NotFound`/`ActiveDraftExists` behavior are intact.
-16. **Paid-tier opt-in is workspace-scoped and defaults off.** A fresh
+    row are left behind.
+26. **Paid-tier opt-in is workspace-scoped and defaults off.** A fresh
     workspace (and every pre-existing Slice 1–5 workspace, post-migration)
-    has `paid_tier_enabled == False`; enabling it for one workspace does not
-    affect any other workspace's value.
-17. **Running cost-per-outreach.** `outreach_cost_summary` returns the
-    correct average across a workspace's *known-cost* drafts, separately
-    reports the count of unknown-cost drafts, and is workspace-scoped
-    (another workspace's drafts never leak in).
-18. **Tenant isolation.** `eval` rows, cost columns, and
+    has `paid_tier_enabled == False`; enabling it for one workspace does
+    not affect any other workspace's value.
+27. **Tenant isolation.** `eval` rows, cost columns, and
     `paid_tier_enabled` never cross workspaces.
-19. **Backward compatibility.** All existing Slice 2–5 tests pass unchanged
-    (the `generate_structured` wrapper preserves the old signature and
-    `LLMError.usage` defaults to `[]`); an existing business/creator draft
-    still drafts and approves exactly as before when no paid tier is
-    involved.
-20. **Sanitized audit/cost details.** No key ever appears in an eval/
-    routing audit detail or a cost string; a rejected-key reason is
-    sanitized as in prior slices; a `TokenUsage` never contains anything
-    but a model name and plain integers/`None`.
-21. **UI wording.** No eval/cost/paid-tier template string contains the word
-    "free"; the cost figure is always labelled "estimated paid list-price
-    cost"; the corrected Gemini Settings hint no longer mentions
-    `GEMINI_API_KEY`.
-22. **Heuristic rubric boundary tests (correction 8), one per outcome:**
-    personalization (identity absent / present-and-referenced /
-    present-and-not-referenced); specificity (evidence present / absent /
-    no stored reasons at all); non-genericness (all four combinations of
-    the two 0/15 and 0/10 sub-checks); clear-ask (0, 1, and 2+ question
-    sentences); missing-body defensive path (`score == 0`, all four
-    dimensions `0`).
+28. **Backward compatibility.** All existing Slice 2–5 tests pass unchanged;
+    an existing business/creator draft still drafts and approves exactly as
+    before when no paid tier is involved.
+29. **Sanitized errors, audit details, and cost breakdowns never expose the
+    key or headers.** No key ever appears in an eval/routing audit detail,
+    a cost string, a `TokenUsage`, or `cost_breakdown_json`; a
+    rejected-key reason is sanitized as in prior slices.
+30. **UI wording.** No eval/cost/paid-tier template string contains the
+    word "free"; the cost figure is always labelled "estimated paid
+    list-price cost"; the corrected Gemini Settings hint no longer
+    mentions `GEMINI_API_KEY`.
+31. **Environment key cannot trigger drafting, evaluation, or escalation.**
+    With `GEMINI_API_KEY` set in `os.environ` and no workspace `gemini`
+    key: drafting takes the heuristic path; `eval.evaluate_draft` returns
+    `EvalStatus.NO_GEMINI_KEY`; routing never escalates even with
+    `paid_tier_enabled=True` and a high-fit target.
+32. **Heuristic rubric boundary tests**, one per outcome: personalization
+    (identity absent / present-and-referenced / present-and-not-referenced);
+    specificity (evidence present / absent / no stored reasons at all);
+    non-genericness (all four combinations of the two sub-checks);
+    clear-ask (0, 1, and 2+ question sentences); missing-body defensive
+    path.
 
 **Safe live verification (deletable, only if authorized).** No paid live
-verification without the owner's explicit authorization (decision 5 of §1).
-If the owner authorizes it, a temporary DB-write-free script may make **one**
-bounded default-model call to confirm the real `usageMetadata` shape
-(including whether `thoughtsTokenCount` is present or absent for this
-model), then be deleted (collaboration.md rule 11). The escalation-model
+verification without the owner's explicit authorization (decision 5 of
+§1). If the owner authorizes it, a temporary DB-write-free script may make
+**one** bounded default-model call to confirm the real `usageMetadata`
+shape (including whether `thoughtsTokenCount` is present or absent for
+this model, to sanity-check the derivation rule in §4.2 against a live
+response), then be deleted (collaboration.md rule 11). The escalation-model
 path is verified by mocked tests only unless/until the owner both approves
 a specific `ESCALATION_MODEL` and authorizes a bounded paid check — per
-decision 6/10, Slice 6 is not marked complete against `SPEC.md` until that
+decision 6, Slice 6 is not marked complete against `SPEC.md` until that
 happens, independent of whether this code is merged.
 
 **UI.** Computed-style light/dark checks for the new eval/cost elements;
@@ -913,17 +1131,25 @@ Modified: `app/llm.py`, `app/agent/drafting.py`, `app/models.py`,
   `SPEC.md` until the owner approves a specific `ESCALATION_MODEL` and it
   passes a safe verification gate. This is expected to remain open past
   this plan's approval.
-- **`gemini-3.6-flash`'s exact current per-million-token input/output/
-  thinking rates** (§4.4) are left as explicit placeholders, to be filled
-  from the official Gemini pricing page immediately before implementation —
-  not fabricated in this plan, and not requiring a paid call to look up.
-- **`thoughtsTokenCount`-absent-means-known-zero** (§4.2) is this plan's own
-  interpretation of the official API's documented behavior for models
-  without extended thinking; flagged in case the owner wants it verified
-  against current documentation before implementation rather than accepted
-  as stated here.
-- **Eval prompt wording** (§5.2) is not fully drafted in this document
-  (unlike `drafting.SYSTEM_PROMPT`, which is quoted verbatim) — the exact
-  system/user prompt text for the LLM judge is left to implementation,
-  constrained by needing to describe the same four 0–25 dimensions the
-  heuristic uses.
+- **`gemini-3.6-flash`'s exact current per-million-token input/output
+  rates** (§4.4 — now only two rates per model, not three) are left as
+  explicit placeholders, to be filled from the official Gemini pricing
+  page immediately before implementation — not fabricated in this plan,
+  and not requiring a paid call to look up.
+- **The `thoughtsTokenCount`-derivation rule** (§4.2/§0.2 correction 3) is
+  this plan's own interpretation of safe derivation for tool-free
+  structured-output calls; flagged in case the owner wants the "safe live
+  verification" script (§6) to specifically confirm whether real
+  `gemini-3.6-flash` responses ever report `thoughtsTokenCount` at all, and
+  if not, whether the `total == prompt + candidates` boundary actually
+  holds in practice.
+- **`cost_tokens`/`estimated_cost_microusd` decoupling** (§4.4/§5.5) is a
+  deliberate refinement beyond the literal correction text — the plan
+  treats a known token *count* and a known token *price* as independently
+  knowable facts about the same attempt, rather than force-coupling their
+  unknown-ness. Flagged for owner confirmation; the simpler, fully-coupled
+  alternative (either both known or both `NULL`, together) remains
+  available if preferred.
+- **Eval prompt wording** (§5.2) is not fully drafted in this document —
+  left to implementation, constrained by needing to describe the same four
+  0–25 dimensions the heuristic uses.

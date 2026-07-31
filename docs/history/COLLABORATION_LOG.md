@@ -2037,3 +2037,134 @@ or coding sessions. It complements, but does not replace:
   (llm.py/drafting.py/models.py core, then eval.py/routing.py, then DB/
   route/UI wiring, then the section 6 verification). Do not implement
   until then.
+
+## 2026-08-01 — Slice 6 plan corrected to v3 (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code
+- Slice: Slice 6 (evaluation and cost-aware routing) — planning only, v3
+- Role: Planner / correction implementer
+- Implementation status: Not started (plan under owner review)
+- Changes and corrections: Applied five further owner-approved SDE 2 review
+  findings against v2 (`cc2c23c`) to `docs/plans/SLICE_6_PLAN.md`, recorded
+  in a new section 0.2 alongside the preserved v1->v2 history in section
+  0.1. (1) Corrected a real gap in v2's usage accounting: v2's population
+  rule said a transport failure or non-2xx response produced no `TokenUsage`
+  record at all, which meant such an attempt would silently vanish from the
+  usage list and could then be miscounted by the aggregation logic as "no
+  calls were made" (a known zero) rather than "a call was made whose outcome
+  is unknown." v3 makes every issued HTTP attempt -- transport failure,
+  non-2xx response, malformed/non-JSON HTTP 200, or a 200 with missing/
+  malformed usageMetadata -- produce exactly one TokenUsage record via a
+  single shared, best-effort `_extract_usage` helper called on every
+  response received (checking even error-response bodies for authoritative
+  usageMetadata, in case a provider ever includes it), with all four count
+  fields None when nothing usable is found. `cost_breakdown == []` /
+  `cost_tokens == 0` / `estimated_cost_microusd == 0` is now reserved
+  strictly for a workflow that issued zero Gemini requests (no workspace
+  key at all) -- the `_call_gemini`/`generate_structured_with_usage` design
+  was reworked so every raised `LLMError` always carries the failed
+  attempt's TokenUsage via its existing `.usage` attribute, and known usage
+  from attempts preceding a later failure is preserved in call order. (2)
+  Removed the separate `"thinking"` rate from
+  `PRICING_USD_PER_MILLION_TOKENS` -- Google prices output inclusive of
+  thinking tokens for these tool-free structured-output requests -- and
+  corrected the dollar formula to `round(promptTokenCount x input_rate) +
+  round((totalTokenCount - promptTokenCount) x output_rate)`, requiring
+  known non-negative `promptTokenCount`/`totalTokenCount` with
+  `totalTokenCount >= promptTokenCount`, defensively re-validated at
+  pricing time independent of what population already enforced (the same
+  "second independent check" discipline `scoring.assert_grounded` uses).
+  `candidatesTokenCount`/`thoughtsTokenCount` remain stored on `TokenUsage`
+  for visibility but are no longer read by the pricing function at all. As
+  a deliberate, explicitly flagged refinement, `cost_tokens` (the token
+  count) and `estimated_cost_microusd` (the dollar estimate) are now
+  independently nullable rather than force-coupled, since a token count and
+  a token price are different pieces of information with different
+  requirements -- flagged in section 8 for the owner to simplify back to
+  full coupling if preferred. (3) Replaced v2's "an absent
+  `thoughtsTokenCount` key means a known zero" rule, which the review
+  identified as an unsafe assumption, with: unknown by default, unless
+  prompt, candidates, and total are all known and `total >= prompt +
+  candidates`, in which case thinking is derived as the non-negative
+  difference (naturally zero at the `total == prompt + candidates`
+  boundary) -- otherwise (any field unknown, or an internally inconsistent
+  `total < prompt + candidates` report) thinking stays unknown. `TokenUsage`
+  gains a `thinking_tokens_derived: bool` field so the persisted breakdown
+  can always distinguish a value the provider actually reported from one
+  this codebase computed. (4) Fixed a genuine API contradiction: v2's
+  `route_and_draft(brief, target, settings) -> RoutingOutcome` never
+  received a `workspace_id`, yet its escalation-eligibility step called
+  `db.get_paid_tier_enabled(workspace_id)` -- code that could not have
+  worked as drafted. `route_and_draft` now takes an explicit
+  `paid_tier_enabled: bool` keyword-only argument and the plan states
+  plainly that `routing.py` performs no database access of any kind;
+  `main.py`'s `create_draft` route now explicitly resolves
+  `db.get_paid_tier_enabled(workspace_id)` using the request's own already-
+  scoped `workspace_id` before calling routing, keeping the tenant-scoping
+  guarantee anchored at the one call site that actually has a workspace
+  identity in scope. (5) Corrected Gemini's authentication transport: the
+  code as shipped since Slice 2 (and carried through v1/v2 unexamined)
+  sends the API key as a `?key=` query parameter; since Slice 6 already
+  refactors `_call_gemini` for the usage-measurement and model-selection
+  changes above, this correction folds in switching to an `x-goog-api-key`
+  request header in the same refactor, matching the exact pattern Slice 5
+  already established for Apify (`Authorization: Bearer`) and YouTube
+  (`X-goog-api-key`) -- `_url(model)` now returns a query-string-free URL,
+  the existing `params={"key": api_key}` is removed from the httpx call
+  entirely, and v2's "out of scope, not undertaken now" note for this exact
+  fix is removed from section 2 since it is now in scope. Every one of the
+  five corrections has new, explicitly named acceptance criteria in the
+  revised section 6 (32 items total, up from 22), including the exact new
+  tests the owner's instruction enumerated: no-request-issued-is-known-zero,
+  transport-failure-produces-unknown, non-2xx-unless-authoritative-usage,
+  malformed-200-preserves-earlier-known-attempts, missing/malformed-
+  usageMetadata-is-unknown, ordered retry-usage preservation, the corrected
+  prompt/output pricing formula, thoughtsTokenCount-not-auto-zero plus its
+  exact derived-zero/derived-difference/unknown boundaries, `main.py`
+  passing a workspace-scoped `paid_tier_enabled` into routing, routing
+  performing zero database lookups, the Gemini key traveling only via the
+  `x-goog-api-key` header, request URLs/query parameters carrying no
+  credential, and sanitized errors/audit details/cost breakdowns never
+  exposing the key or headers. Every v2 decision the owner asked to
+  preserve was carried forward unchanged: strict workspace-key-only
+  behavior with no environment fallback; `HIGH_FIT_THRESHOLD = 85` and
+  `CONFIDENCE_THRESHOLD = 80`, both inclusive; the dedicated
+  `workspace.paid_tier_enabled` column, default off; the LLM judge with its
+  fully specified deterministic rubric fallback; per-attempt retry
+  accounting; terminal invalid-key behavior; atomic draft/eval/cost/audit
+  persistence; the SQLite-enforced one-eval-per-draft constraint; "estimated
+  paid list-price" wording; the no-paid-live-verification-without-
+  authorization rule; and the explicit statement that Slice 6 cannot be
+  marked complete until the stronger model is owner-approved and passes its
+  verification gate.
+- Files or areas affected: `docs/plans/SLICE_6_PLAN.md` (rewritten, v2 ->
+  v3), `collaboration.md` (handoff + recent activity), and this history
+  entry. No application code, tests, templates, styles, seeds, schema, or
+  dependency files were touched.
+- Verification: Documentation-only change; no app code was written or run.
+  The 212-test Slice 5 baseline is unchanged and was re-confirmed passing
+  both before this revision began and again immediately before the commit.
+  `git diff --check` passes on the three changed files. A credential-shaped-
+  string scan (API-key/token/Bearer/query-parameter patterns) across the
+  three changed files found no matches. Confirmed via `git status` that
+  only `docs/plans/SLICE_6_PLAN.md`, `collaboration.md`, and
+  `docs/history/COLLABORATION_LOG.md` are staged, and that the working tree
+  is clean immediately after the commit.
+- Last known working state: `codex/sde-1-slice-2-hardening` at `b640b49`;
+  the application is unchanged at the Slice 5 completion state. Only these
+  three documentation files differ from that baseline.
+- Known limitations: Every numeric pricing constant in the plan remains an
+  explicit, labelled placeholder, not a verified figure -- implementation
+  must not proceed with a guessed number. The stronger model id remains
+  entirely undecided, by design. The plan's thoughtsTokenCount-derivation
+  rule and its independent-unknown-ness treatment of `cost_tokens` versus
+  `estimated_cost_microusd` are both flagged in the plan's own section 8 as
+  interpretations the owner may want to confirm, adjust, or simplify before
+  implementation. No live provider call of any kind was made or needed for
+  this documentation-only revision.
+- Next action: Owner reviews `docs/plans/SLICE_6_PLAN.md` v3. After
+  explicit implementation approval and the model-switch confirmation to
+  Sonnet, implementation may begin per the plan's section 5 build order
+  (llm.py's header-auth-plus-usage refactor, drafting.py's widened
+  DraftResult, and models.py first, then eval.py/routing.py, then DB/route/
+  UI wiring, then the section 6 verification). Do not implement until then.
