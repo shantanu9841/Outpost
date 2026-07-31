@@ -989,3 +989,105 @@ or coding sessions. It complements, but does not replace:
   `draft` table + partial unique index + atomic DB functions, then the routes/
   nav/UI, then the §11.1 retained tests, then the §11.2 no-key and live-Gemini
   verification.
+
+## 2026-07-31 — Slice 4 plan corrected to v2.1 (planning only, no implementation)
+
+- Contributor/environment: SDE 1 / Claude Code (session switched to Sonnet by
+  the owner partway through this correction pass; see below)
+- Slice: Slice 4 (drafting, approval queue, pipeline) — planning correction only
+- Role: Planner / Reviewer
+- Implementation status: Not started
+- Changes and corrections: Revised `SLICE_4_PLAN.md` from v2 to v2.1,
+  incorporating five owner-flagged blocking findings against v2, each
+  grounded against the actually-committed Slice 2/3 code before being folded
+  in (same discipline as the v2 pass). The owner switched this session's model
+  to Sonnet via `/model` partway through the request; this remained a
+  planning-only correction pass (grounded findings with concrete, specified
+  fixes, not open-ended architectural judgment), so it continued rather than
+  stopping to request an Opus switch — flagged in the plan's §0 model-status
+  section for the owner's visibility. The five findings, added as items 8–12
+  in a new §0.2: (8) an unapproved target could have its stage advanced by a
+  direct POST, because `list_pipeline_targets` only *displayed* targets with
+  an approved draft rather than the database *refusing* the mutation —
+  `set_target_stage` now requires a workspace-scoped approved draft to exist
+  before evaluating any stage transition, raising `NotFound` (deliberately
+  indistinguishable from a missing/cross-workspace target, to avoid the
+  response itself confirming a target's existence in another state) when none
+  exists; a new public `has_approved_draft` supports direct testing of the
+  same check `set_target_stage` performs internally. (9) The draft-creation
+  route had no defined way to load the target and campaign brief — added
+  `db.get_target(workspace_id, target_id)`, scoped identically to every other
+  Slice 4 function, composed with the existing `db.get_campaign` to build the
+  `Brief` the drafting module needs. (10) Human-submitted draft bodies were
+  not server-validated, so a crafted POST could approve blank text — pulled
+  `OutreachDraft.body_is_reasonable`'s 20–1500 character bound into one shared
+  `validate_draft_body` function, called by both the Pydantic schema (model
+  path) and `db.py`'s `save_draft_body`/`approve_draft` (human path); decided
+  explicitly (owner's question) that yes, the same bound applies to human
+  edits, since a blank approval would defeat "a human approves every send" as
+  surely as a blank model draft would. (11) `draft.created`'s audit row
+  couldn't explain the drafting outcome — `add_draft` now takes `DraftResult`'s
+  `status` and `reason` and builds the audit `detail` from them
+  (`status.value`, or `"{status.value}: {reason}"` when set); `DraftResult`'s
+  docs were extended so `HEURISTIC_FALLBACK` now also sets a fixed,
+  non-sensitive `reason` (the model's actual draft body is never echoed into
+  an audit `detail`), closing the gap where "no key," "key rejected,"
+  "provider error," and "grounding gate rejected the model" all collapsed to
+  the same `model_used == "heuristic"` with no further explanation. (12) The
+  route was going to catch every `sqlite3.IntegrityError` as a duplicate
+  draft — added a dedicated `ActiveDraftExists` exception that `add_draft`
+  raises only when the failure matches the `one_active_draft_per_target`
+  index (identified by message-text matching, since SQLite does not raise a
+  distinctly typed exception per constraint — flagged as a known limitation);
+  every other `IntegrityError` now propagates unmapped as a genuine 500
+  instead of being silently absorbed. Each finding was threaded through every
+  affected section, not just its own paragraph: §3.1's transition tables and
+  controlled-response contract, §4's `DraftResult` docs, §4.1's schema
+  section, §5's function signatures and exception list, §6's route bodies and
+  error handling, §8's audit table, §9's non-negotiables mapping, §10's
+  files-changed list, five new items in §11.1's retained-test list (16–20,
+  later trimmed to 16–19 after finding item 20 duplicated item 10's coverage
+  during the final consistency read), and four new numbered decisions in
+  §12/§13. A full top-to-bottom read of the finished v2.1 (required before
+  committing, per the owner's instructions) found and fixed three residual
+  inconsistencies: the duplicate test item just mentioned, a stale "this v2
+  makes each mutation atomic" phrase in §0 that should have read "this plan"
+  now that both v2 and v2.1 corrections stack on top of it, and §3's
+  partial-unique-index description still saying a race "raises
+  `sqlite3.IntegrityError`" without noting that §5's `add_draft` now
+  translates that into `ActiveDraftExists` before it reaches a route.
+- Files or areas affected: `SLICE_4_PLAN.md` (revised to v2.1) and this
+  `collaboration.md` entry. No application code, tests, templates, CSS,
+  schemas, `outpost.db`, or seed data were touched — planning only.
+  `PROGRESS.md` and `DECISIONS.md` were intentionally not updated (no
+  implementation yet).
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of grounding each finding against the specific plan
+  lines the owner cited (confirmed each was real, not already addressed), a
+  full internal-consistency read of the finished v2.1 (the pass that found
+  and fixed the three residual inconsistencies above), a `grep` confirming
+  every exception name (`NotFound`/`InvalidTransition`/`InvalidDraftBody`/
+  `ActiveDraftExists`) and every `sqlite3.IntegrityError` mention is used
+  consistently across sections, and `git diff --check` (clean; only the
+  expected Windows LF→CRLF notice).
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `da74798` before this commit. `SLICE_4_PLAN.md` is the only file whose
+  content changed (plus this log entry); the application remains at the
+  Slice 3 (hardened) state — Slice 4 has not been implemented.
+- Known limitations: `add_draft`'s `ActiveDraftExists` detection relies on
+  matching SQLite's `IntegrityError` message text, since the driver does not
+  expose a distinctly typed exception per constraint — documented in the plan
+  itself (§12 decision 13) as slightly brittle to a SQLite message-format
+  change across versions, with no better mechanism available short of a
+  redundant pre-check that would reintroduce the exact race the index exists
+  to close. The live-Gemini and no-key manual verification steps (§11.2)
+  still require implementation to actually run; nothing about this pass
+  changes what they need to prove.
+- Next action: Owner confirms v2.1 has no further outstanding changes. Per
+  collaboration.md rule 6, implementation may then begin on Sonnet (the model
+  already active for this session) — starting with `app/models.py`
+  (`OutreachDraft`), then `app/agent/drafting.py` (including
+  `validate_draft_body`), then the `draft` table + partial unique index +
+  atomic DB functions (including `get_target`, `has_approved_draft`, and the
+  four typed exceptions), then the routes/nav/UI, then the §11.1 retained
+  tests (19 items), then the §11.2 no-key and live-Gemini verification.

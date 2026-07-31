@@ -4,22 +4,29 @@ Plan for Slice 4 (SPEC.md §6). This document is the single source of truth for
 Slice 4's design. No implementation has started — this commit contains only
 `SLICE_4_PLAN.md` and a `collaboration.md` log entry.
 
-This is the **v2** plan: the original v1 (`2ded7e9`) was reviewed and revised for
-seven owner-approved SDE 2 corrections (§0.1). The corrections tighten Slice 4
-toward the non-negotiables (#4 audit, #5 structured output, #6 isolation) and
-SPEC §4/§6's "references the cited evidence"; none expand scope beyond SPEC.md.
+This is the **v2.1** plan: v1 (`2ded7e9`) was revised to v2 for seven
+owner-approved SDE 2 corrections (§0.1), then to v2.1 for five further
+owner-flagged **blocking findings** against v2 (§0.2). All twelve tighten
+Slice 4 toward the non-negotiables (#4 audit, #5 structured output, #6
+isolation) and SPEC §4/§6's "references the cited evidence"; none expand scope
+beyond SPEC.md.
 
 ## 0. Collaboration & model status
 
 - **SDE 1** (this session) authored v1 on the stronger reasoning model
   (Opus 4.8), including the drafting prompt (§4.2), because the drafting voice is
   the one genuinely writing-heavy part of this slice and SPEC.md mandates
-  applying the `beautiful-prose` and `humanizer` skills to it. This v2 revision
-  is likewise a planning-only pass on Opus; **no code has changed.**
+  applying the `beautiful-prose` and `humanizer` skills to it. The v2 revision
+  was likewise a planning-only pass on Opus; **no code had changed.** This v2.1
+  revision — five more blocking findings against v2 — was made after the owner
+  switched the session to **Sonnet**; it remains planning-only (**no code has
+  changed**) and every finding was grounded against the actually-committed
+  Slice 2/3 code before being folded in, the same discipline the v2 pass used.
 - Recommended **execution model: Sonnet** — with the prompt, state machines,
   grounding gate, and atomic-audit design settled here, implementation is
-  mechanical. Stated again at the top of implementation so the owner can confirm
-  the switch before code begins (CLAUDE.md).
+  mechanical. This is the model the owner has already switched to for this
+  session; stated again at the top of implementation so the owner can
+  reconfirm before code begins (CLAUDE.md).
 - Per `collaboration.md` rule 6: implementation begins only after the owner
   confirms this plan has no further outstanding changes. §12 lists the
   interpretive decisions this plan makes, so the owner can veto any before code.
@@ -29,7 +36,7 @@ SPEC §4/§6's "references the cited evidence"; none expand scope beyond SPEC.md
   to `main` first — is the owner's call, per rule 6).
 - Non-negotiables in play (CLAUDE.md): **#4 a human approves every send and
   every action is audited** — this is the slice where that rule earns its
-  keep, and this v2 makes each mutation and its audit row **atomic** (§8);
+  keep, and this plan makes each mutation and its audit row **atomic** (§8);
   #2 demo mode always completes (drafting must work with zero keys); #5
   structured output validated with retry; #6 workspace isolation, now enforced
   at the **database boundary**, not only in the route (§5, §6); the `memory`
@@ -68,6 +75,37 @@ SPEC §4/§6's "references the cited evidence"; none expand scope beyond SPEC.md
 7. **Each mutation and its audit row commit in one transaction** (§8): on
    failure neither remains; on success exactly one audit row is written with the
    correct `workspace_id` / `campaign_id` / `target_id` / `draft_id`.
+
+### 0.2 What changed from v2 to v2.1 (five blocking findings)
+
+8. **A target can no longer be advanced by direct POST without an approved
+   draft.** `set_target_stage` now requires a workspace-scoped approved draft
+   for the target before allowing *any* transition, including the implicit
+   first move off `queued` — closing a gap where the pipeline's stated
+   approval gate (§3.1) was enforced only by `list_pipeline_targets` filtering
+   what's *displayed*, not by what the DB would *accept* (§3.1, §5).
+9. **The draft-creation route has a defined, scoped loader.** A new
+   `db.get_target(workspace_id, target_id)` joins nothing extra by itself but
+   is scoped identically to every other Slice 4 function; the route composes
+   it with the existing `db.get_campaign` to build the `Brief` the drafting
+   module needs, and both lookups are tested against a cross-workspace id (§5,
+   §6).
+10. **Human-submitted draft bodies are validated server-side**, not trusted as
+    submitted. `save_draft_body` and `approve_draft` both reject a blank or
+    over-long body before any mutation, via the same length bound
+    `OutreachDraft.body_is_reasonable` already enforces on the model, made into
+    one shared function both call (§4.1, §5).
+11. **`draft.created`'s audit row now explains the drafting outcome.**
+    `add_draft` takes the `DraftResult`'s `status` and `reason`, so the atomic
+    audit row records whether Gemini succeeded, no key existed, the grounding
+    gate rejected the model's draft, or a provider error caused the fallback —
+    not just that *a* draft was created (§4, §5, §8).
+12. **Only the specific active-draft race is swallowed.** `add_draft` catches
+    `sqlite3.IntegrityError` and re-raises it as a dedicated
+    `ActiveDraftExists` only when the failure matches the
+    `one_active_draft_per_target` index; every other integrity failure
+    propagates unmapped, so an unrelated constraint violation is never
+    silently treated as a harmless double-submit (§5, §6).
 
 ---
 
@@ -147,10 +185,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_active_draft_per_target
 SQLite supports partial (`WHERE`-clause) unique indexes. A rejected draft is
 excluded from the index, so re-drafting after a rejection is always allowed
 (§6.2); an approved or pending/edited draft occupies the slot, so a second
-concurrent draft request for the same target raises `sqlite3.IntegrityError`
-rather than creating a duplicate active draft. This is the authoritative guard
-under a double-submit race; the §6 memory check is the friendly UX layer on top
-of it, not the guarantee.
+concurrent draft request for the same target raises `sqlite3.IntegrityError` at
+the SQL level rather than creating a duplicate active draft — `add_draft` (§5)
+catches that and re-raises it as the typed `ActiveDraftExists` (finding 12,
+§0.2) before it ever reaches a route. This is the authoritative guard under a
+double-submit race; the §6 memory check is the friendly UX layer on top of it,
+not the guarantee.
 
 `cost_tokens` is created now (the column is part of SPEC's schema) but left
 `NULL` this slice — `llm.py` does not yet record token cost; that is Slice 6's
@@ -203,11 +243,22 @@ STAGE_TRANSITIONS = {
 - A same-stage request (e.g. `contacted → contacted`) is an idempotent no-op:
   no change, **no** `target.stage_changed` audit row (a same-stage "change"
   would be a misleading audit entry — §12 decision 3).
+- **The stage machine does not apply at all until a draft is approved for that
+  target** (finding 8, §0.2). `set_target_stage` requires a workspace-scoped
+  **approved** draft to exist for `(workspace_id, target_id)` before evaluating
+  `STAGE_TRANSITIONS` at all — otherwise it raises `NotFound`, identically to a
+  missing or cross-workspace target. This closes a gap the v2 plan left open:
+  `list_pipeline_targets` only *displaying* targets with an approved draft is
+  not the same as the database *refusing* to move an unapproved target's stage
+  by a direct POST. Treating "not yet admitted" the same as "not found" (rather
+  than inventing a distinct status code) avoids leaking, via the response
+  itself, whether a target exists but is simply unapproved.
 
 The gate between the two machines: **approving a draft admits its target to the
-pipeline board** (§7.2). Before any approved draft, a target is a scored
-candidate on the campaign page and is *not* on the board. This is the plan's
-central interpretive decision (§12, decision 1).
+pipeline board, and only an admitted target's stage can ever change** (§7.2).
+Before any approved draft, a target is a scored candidate on the campaign page,
+is *not* on the board, and its `stage` column cannot be moved by any route.
+This is the plan's central interpretive decision (§12, decision 1).
 
 Controlled-response contract (shared by every §6 route, §5 DB function, and
 §11 test):
@@ -215,9 +266,12 @@ Controlled-response contract (shared by every §6 route, §5 DB function, and
 | Condition | Response |
 |---|---|
 | Target/draft id from another workspace, or missing | resolves to not-found → redirect to the list page (never a leak, never a 500) |
+| Stage-change attempt on a target with no approved draft | resolves to not-found (same as above — the target isn't yet a pipeline entity) → redirect to `/pipeline` |
 | Malformed enum input (`stage`, `action`) | FastAPI `Literal` typing → **422** |
+| Blank or over-long human-submitted draft body | **422**, no mutation, no audit (finding 10) |
 | Valid enum value but illegal current-state transition | **409** (controlled conflict), no mutation, no audit |
-| Double-submit race creating a second active draft | `IntegrityError` → redirect to `/approvals` (the winning draft is already there), no error page |
+| Double-submit race creating a second active draft (the `one_active_draft_per_target` index) | `ActiveDraftExists` → redirect to `/approvals` (the winning draft is already there), no error page (finding 12) |
+| Any other `sqlite3.IntegrityError` on draft creation | propagates unmapped (a real bug, not a race) — never silently treated as a duplicate (finding 12) |
 
 ---
 
@@ -238,11 +292,21 @@ class DraftResult:
     body: str
     model_used: str          # GEMINI_MODEL on LLM_OK, "heuristic" otherwise
     status: DraftStatus
-    reason: str | None       # sanitized, safe for audit; None unless a failure occurred
+    reason: str | None       # sanitized, safe for audit; see below for when it's set
 
 def draft_outreach(brief: Brief, target: dict, settings: dict[str, str],
                    *, known_invalid_key_reason: str | None = None) -> DraftResult: ...
 ```
+
+`reason` is set (not just `None`-on-success) whenever the audit needs more than
+the bare status to explain what happened (finding 11, §0.2): the existing
+credential/provider-error cases (`exc.message`), and now also
+`HEURISTIC_FALLBACK`, where `reason` is set to a short, fixed, non-sensitive
+string (e.g. `"model draft did not pass the grounding check"`) so the
+`draft.created` audit row (§5, §8) can distinguish "the model never ran" from
+"the model ran and its draft was rejected" — both currently collapse to
+`model_used == "heuristic"` alone, which finding 4/11 flagged as insufficient.
+`LLM_OK` still has `reason = None` (nothing to explain).
 
 - `known_invalid_key_reason` reuses the Slice-3-hardening discipline: if a
   caller already knows this Gemini key is rejected, skip the live call. (It
@@ -290,6 +354,18 @@ driven by `generate_structured`'s existing two-shot retry (non-negotiable #5).
 **Truth** — that the pair is real and the body uses it — is a separate runtime
 check (§4.4), exactly as Slice 3 separates `FitReason`'s schema from
 `_is_grounded`'s runtime check.
+
+The 20–1500 character bound above is pulled out into one plain function,
+`validate_draft_body(text: str) -> str` (raises `ValueError` with the same two
+messages), so it has exactly one definition. `body_is_reasonable` calls it for
+the model path; `app/db.py`'s `save_draft_body` and `approve_draft` call it too
+(finding 10, §0.2) — a **human**-submitted body is held to the same bound as a
+model-authored one. This is a deliberate choice, not an oversight: a blank or
+whitespace-only approval would defeat "a human approves every send" just as
+surely as a blank model draft would, and reusing one function means the two
+paths cannot drift to different bounds by accident (`db.py` imports it from
+`app.agent.drafting`; no circular import, since `drafting.py` does not import
+`db`).
 
 ### 4.2 The drafting prompt (authored from `beautiful-prose` + `humanizer` + The Mom Test)
 
@@ -440,48 +516,89 @@ transaction** as the mutation (correction 7, §8) via a shared internal
 committing; the function commits once at the end, so a mutation and its audit
 row are all-or-nothing.
 
-Two small typed exceptions signal controlled failures to the routes (kept in
+Four small typed exceptions signal controlled failures to the routes (kept in
 `db.py`, imported by `main.py` and the tests):
 
 ```python
-class NotFound(Exception): ...           # id absent or in another workspace -> route redirects
-class InvalidTransition(Exception): ...   # illegal state change -> route returns 409
+class NotFound(Exception): ...            # id absent, in another workspace, or (for a stage
+                                           # change) not yet admitted to the pipeline -> route redirects
+class InvalidTransition(Exception): ...    # illegal state change -> route returns 409
+class InvalidDraftBody(Exception): ...     # blank/over-long human-submitted body -> route returns 422
+class ActiveDraftExists(Exception): ...    # the one_active_draft_per_target race -> route redirects
 ```
+
+`ActiveDraftExists` (finding 12, §0.2) is deliberately narrow: `add_draft`
+catches `sqlite3.IntegrityError` and re-raises it as `ActiveDraftExists` only
+when the error's message identifies the `one_active_draft_per_target` index (or
+equivalently, both `draft.workspace_id` and `draft.target_id` as the offending
+columns — SQLite names the columns or the index in a `UNIQUE constraint failed`
+message, and this is the only unique constraint on `draft`). Any other
+`IntegrityError` (e.g. a future foreign-key violation) is **not** caught here
+and propagates as a genuine 500 — silently mapping every integrity failure to
+"someone double-submitted" would hide a real bug behind a harmless-looking
+redirect.
 
 Functions:
 
 ```python
-def add_draft(workspace_id, target_id, body, model_used, actor="agent") -> int
+def get_target(workspace_id, target_id) -> Row | None
+    # SELECT * FROM target WHERE workspace_id = ? AND id = ?. Scoped like every
+    # other tenant read. The draft-creation route (§6) uses this, then
+    # db.get_campaign(workspace_id, target["campaign_id"]) (already exists,
+    # Slice 2), to load the Brief the drafting module needs
+    # (Brief.model_validate_json(campaign["brief_json"])) (finding 9, §0.2).
+
+def add_draft(workspace_id, target_id, body, model_used, status, reason=None,
+              actor="agent") -> int
     # INSERT ... SELECT tenancy guard: inserts only if the target row exists in
     # THIS workspace. rowcount == 0 -> raise NotFound (no leak, no orphan draft).
-    # The partial unique index raises sqlite3.IntegrityError if an active draft
-    # already exists (double-submit race). Writes draft.created audit + the new
-    # draft in one transaction. Returns the new draft id.
+    # status/reason come straight from DraftResult (finding 11, §0.2): the
+    # draft.created audit detail is built as status.value alone, or
+    # "{status.value}: {reason}" when reason is set -- so the atomic audit row
+    # always records WHY this body was produced (llm_ok / no_gemini_key /
+    # invalid_gemini_key / gemini_error / heuristic_fallback), not just that a
+    # draft now exists. sqlite3.IntegrityError from the partial unique index ->
+    # re-raised as ActiveDraftExists (finding 12). Writes draft.created audit +
+    # the new draft in one transaction. Returns the new draft id.
 
 def get_draft(workspace_id, draft_id) -> Row | None                       # scoped
 
 def get_active_draft_for_target(workspace_id, target_id) -> Row | None     # latest non-rejected draft, or None (memory/UX check)
+
+def has_approved_draft(workspace_id, target_id) -> bool
+    # EXISTS (SELECT 1 FROM draft WHERE workspace_id=? AND target_id=? AND
+    # status='approved'). Public and independently testable (finding 8, §0.2);
+    # set_target_stage performs the equivalent check inside its own
+    # transaction rather than calling this and reopening a connection, but the
+    # two must and do agree -- covered by a retained test that calls both.
 
 def list_pending_drafts(workspace_id) -> list[Row]
     # status IN ('pending','edited'); joins target (both workspace_ids qualified)
     # for name/fit/campaign context. This is the Approvals queue and the nav count.
 
 def save_draft_body(workspace_id, draft_id, edited_body, actor="human") -> None
+    # validate_draft_body(edited_body) first (finding 10, §0.2) -> raises
+    # InvalidDraftBody on blank/over-long, before touching the DB. Then the
     # transition guard: current status must allow 'edited' (pending|edited).
     # Sets edited_body, status='edited'; writes draft.edited audit; one txn.
     # Illegal (approved/rejected) -> InvalidTransition. Missing -> NotFound.
 
 def approve_draft(workspace_id, draft_id, submitted_body, actor="human") -> None
-    # transition guard: current status must allow 'approved' (pending|edited).
-    # If submitted_body (the CURRENT textarea text) differs from the stored
-    # (edited_body or body), set edited_body = submitted_body in THIS operation
-    # (correction 2 — no lost edits). Set status='approved'. Write ONE
-    # draft.approved audit (detail flags "approved with inline edits" when the
-    # body changed). All in one transaction.
+    # validate_draft_body(submitted_body) first (finding 10) -> InvalidDraftBody
+    # on blank/over-long, before touching the DB -- a crafted blank-body POST
+    # cannot approve empty text. Then the transition guard: current status must
+    # allow 'approved' (pending|edited). If submitted_body (the CURRENT
+    # textarea text) differs from the stored (edited_body or body), set
+    # edited_body = submitted_body in THIS operation (correction 2 — no lost
+    # edits). Set status='approved'. Write ONE draft.approved audit (detail
+    # flags "approved with inline edits" when the body changed). All in one
+    # transaction.
 
 def reject_draft(workspace_id, draft_id, actor="human") -> None
     # transition guard allows 'rejected' from pending|edited. status='rejected';
-    # draft.rejected audit; one txn. Illegal -> InvalidTransition.
+    # draft.rejected audit; one txn. Illegal -> InvalidTransition. (Reject
+    # discards whatever text was in the textarea -- there is nothing to
+    # validate or save.)
 
 def list_pipeline_targets(workspace_id) -> list[Row]
     # Targets with an approved draft. GROUP BY target.id so each target appears
@@ -491,11 +608,14 @@ def list_pipeline_targets(workspace_id) -> list[Row]
     # Both workspace_ids qualified.
 
 def set_target_stage(workspace_id, target_id, new_stage, actor="human") -> bool
-    # Reads current stage + campaign_id scoped to this workspace (missing ->
-    # NotFound). Same stage -> no-op, returns False, NO audit (correction 1).
-    # new_stage not in STAGE_TRANSITIONS[current] -> InvalidTransition (409).
-    # Else UPDATE stage + target.stage_changed audit (detail "old -> new") in one
-    # transaction; returns True.
+    # Reads the target scoped to this workspace (missing -> NotFound). Checks
+    # for an approved draft for this target IN THE SAME TRANSACTION (finding 8,
+    # §0.2) -- none -> NotFound (identical response to a missing target; see
+    # §3.1's rationale for not distinguishing the two). Same stage -> no-op,
+    # returns False, NO audit (correction 1). new_stage not in
+    # STAGE_TRANSITIONS[current] -> InvalidTransition (409). Else UPDATE stage +
+    # target.stage_changed audit (detail "old -> new") in one transaction;
+    # returns True.
 ```
 
 - The audit row every function writes includes the correct `workspace_id`,
@@ -506,6 +626,9 @@ def set_target_stage(workspace_id, target_id, new_stage, actor="human") -> bool
 - `STAGES`, `STAGE_SET`, `STAGE_TRANSITIONS`, `DRAFT_STATUSES`, and
   `DRAFT_TRANSITIONS` (§3.1) are module constants in `db.py` — one source of
   truth for the DB guard, the routes, and the tests.
+- `validate_draft_body` (§4.1) is imported from `app.agent.drafting` — one
+  definition of the 20–1500 character bound, used by the Pydantic schema for
+  model output and by `db.py` for human-submitted bodies alike (finding 10).
 - The existing `db.add_audit` (separate connection/commit) stays for the Slice
   2/3 intake/discovery/scoring rows; it is refactored to delegate to the shared
   `_insert_audit` helper so there is one audit-insert code path. Slice 4's new
@@ -518,18 +641,29 @@ def set_target_stage(workspace_id, target_id, new_stage, actor="human") -> bool
 
 Each route is `workspace`-scoped via the existing `get_current_workspace`
 dependency. A `db.NotFound` from any function is caught and redirected (the
-not-found contract); a `db.InvalidTransition` is caught and returned as
-`HTTPException(status_code=409)`; a `sqlite3.IntegrityError` on draft creation
-redirects to `/approvals` (§3.1 race row).
+not-found contract — this now also covers a stage-change attempt on a target
+with no approved draft, §3.1); a `db.InvalidTransition` is caught and returned
+as `HTTPException(status_code=409)`; a `db.InvalidDraftBody` is caught and
+returned as `HTTPException(status_code=422)` (finding 10); a
+`db.ActiveDraftExists` on draft creation redirects to `/approvals` (finding 12,
+§3.1 race row) — any other `sqlite3.IntegrityError` is **not** caught here and
+propagates as a 500.
 
 ```
 POST /targets/{target_id}/draft
+    - Load the target: target = db.get_target(workspace, target_id); None ->
+      redirect /campaigns (NotFound-shaped, finding 9). Load its campaign via
+      the existing db.get_campaign(workspace, target["campaign_id"]) and parse
+      Brief.model_validate_json(campaign["brief_json"]) — the same brief
+      Slice 2/3 already persisted, now given to drafting for the first time.
     - MEMORY / UX check: if get_active_draft_for_target(...) is not None,
       redirect to /approvals (the existing active draft is already there) —
       do NOT create a second. This is the friendly layer; the partial unique
       index is the authoritative guard behind it.
-    - Else draft_outreach(brief, target, settings) -> DraftResult; add_draft(...)
-      (which writes draft.created atomically). IntegrityError (lost the race) ->
+    - Else draft_outreach(brief, target, settings) -> DraftResult; add_draft(
+      workspace, target_id, result.body, result.model_used, result.status,
+      result.reason) — the atomic draft.created audit now carries the drafting
+      outcome (finding 11). ActiveDraftExists (lost the race, finding 12) ->
       redirect /approvals. NotFound -> redirect /campaigns. Success -> /approvals.
 
 GET  /approvals
@@ -542,15 +676,20 @@ POST /drafts/{draft_id}/action
         save    -> save_draft_body(workspace, draft_id, body)
         approve -> approve_draft(workspace, draft_id, body)   # body captured if changed
         reject  -> reject_draft(workspace, draft_id)          # body ignored; reject is terminal
-    - InvalidTransition -> 409. NotFound -> redirect /approvals. Else -> /approvals.
+    - InvalidDraftBody -> 422 (finding 10, save/approve only — reject never
+      validates body). InvalidTransition -> 409. NotFound -> redirect
+      /approvals. Else -> /approvals.
 
 GET  /pipeline
     - list_pipeline_targets(workspace) grouped into the five stage columns (§7.2).
 
 POST /targets/{target_id}/stage
     - stage: PipelineStage = Form(...)  # Literal over STAGES -> 422 on garbage
-    - set_target_stage(...). InvalidTransition -> 409. NotFound -> redirect
-      /pipeline. Same-stage -> no-op (returns False, no audit). Else -> /pipeline.
+    - set_target_stage(...). NotFound -> redirect /pipeline (covers both "no
+      such target in this workspace" and "target has no approved draft yet",
+      finding 8 — same response, so neither is distinguishable from the
+      other). InvalidTransition -> 409. Same-stage -> no-op (returns False, no
+      audit). Else -> /pipeline.
 ```
 
 ### 6.1 Shared nav context
@@ -666,7 +805,7 @@ and typo-proof:
 
 | action | actor | written by (atomically, with the mutation) |
 |---|---|---|
-| `draft.created` | agent | `add_draft` |
+| `draft.created` | agent | `add_draft` (detail = `DraftResult.status.value`, plus `: {reason}` when set — e.g. `heuristic_fallback: model draft did not pass the grounding check`, `invalid_gemini_key: <sanitized reason>` — finding 11, §0.2) |
 | `draft.edited` | human | `save_draft_body` |
 | `draft.approved` | human | `approve_draft` (detail flags inline edits when the body changed at approval) |
 | `draft.rejected` | human | `reject_draft` |
@@ -693,7 +832,11 @@ phrase or a sensible default, so an unmapped action never crashes the page.
   acts; approve/reject/edit/stage each write **exactly one** audit row **in the
   same transaction** as the change (§8); **nothing is ever transmitted** —
   "approved" is a status, and marking "contacted" is the owner recording that
-  *they* reached out (SPEC §7: real send integration is out of scope).
+  *they* reached out (SPEC §7: real send integration is out of scope). A
+  target's stage cannot move at all until a human has approved a draft for
+  it — enforced by `set_target_stage` itself, not only by what the pipeline
+  page displays (finding 8, §0.2) — and neither Save nor Approve can persist a
+  blank or malformed human edit (finding 10, §0.2).
 - **#5 structured output:** the LLM path returns a validated `OutreachDraft`
   (body + evidence pair) with the existing two-shot retry, then the §4.4
   grounding gate on top.
@@ -712,20 +855,25 @@ phrase or a sensible default, so an unmapped action never crashes the page.
 
 **New:**
 - `app/agent/drafting.py` (schema-driven LLM path + neutral heuristic + §4.4
-  grounding gate).
+  grounding gate + the shared `validate_draft_body` bound, finding 10).
 - `app/templates/approvals.html`, `app/templates/pipeline.html`.
 - `tests/test_slice4_drafting.py` (retained — §11.1).
 
 **Modified:**
 - `app/models.py` — `OutreachDraft` (body + evidence_key + evidence_value).
-- `app/db.py` — `draft` table + partial unique index in `init()`; the §5
-  draft/pipeline functions (atomic mutation+audit, tenancy guard, transition
-  guards); `STAGES`/`STAGE_SET`/`STAGE_TRANSITIONS`/`DRAFT_STATUSES`/
-  `DRAFT_TRANSITIONS` constants; `NotFound`/`InvalidTransition`; the shared
-  `_insert_audit` helper (`add_audit` refactored to delegate to it).
+- `app/db.py` — `draft` table + partial unique index in `init()`; `get_target`
+  (finding 9); the §5 draft/pipeline functions (atomic mutation+audit, tenancy
+  guard, transition guards, body validation, the approved-draft gate on stage
+  changes); `has_approved_draft` (finding 8); `STAGES`/`STAGE_SET`/
+  `STAGE_TRANSITIONS`/`DRAFT_STATUSES`/`DRAFT_TRANSITIONS` constants;
+  `NotFound`/`InvalidTransition`/`InvalidDraftBody`/`ActiveDraftExists`
+  (findings 8/10/12); the shared `_insert_audit` helper (`add_audit`
+  refactored to delegate to it).
 - `app/main.py` — the §6 routes (including the single `/drafts/{id}/action`
-  dispatcher and its `DraftAction` literal); `nav_context` helper; the §6.2
-  `campaign_detail` draft-CTA join + `_draft_cta`; Activity list.
+  dispatcher and its `DraftAction` literal, the target/brief loader for
+  `POST /targets/{id}/draft`, and the `InvalidDraftBody`/`ActiveDraftExists`
+  handlers); `nav_context` helper; the §6.2 `campaign_detail` draft-CTA join +
+  `_draft_cta`; Activity list.
 - `app/audit_banners.py` — the §8 action constants + `ACTION_LABELS`/`label_for`.
 - `app/templates/base.html` — Approvals + Pipeline nav items with the count pill.
 - `app/templates/campaign_detail.html` — Draft/status cell per target + Activity list.
@@ -782,10 +930,14 @@ writes. Covering every correction:
 9. **Re-draft after rejection** (corrections 5 & 6): `get_active_draft_for_target`
    ignores a rejected draft; a new `add_draft` after a rejection succeeds; the
    campaign-detail CTA for a rejected-with-no-active target is **Draft again**.
-10. **One-active-draft concurrency / uniqueness** (correction 6): a second
-    `add_draft` while an active (pending/edited/approved) draft exists raises
-    `sqlite3.IntegrityError` (the partial unique index); the route maps that to a
-    `/approvals` redirect, not a duplicate.
+10. **One-active-draft concurrency / uniqueness** (correction 6, refined by
+    finding 12): a second `add_draft` while an active (pending/edited/approved)
+    draft exists raises `ActiveDraftExists` (not a bare `sqlite3.IntegrityError`
+    — the partial unique index's failure is caught and re-raised specifically);
+    the route maps `ActiveDraftExists` to an `/approvals` redirect. A separate
+    test asserts that a *different*, unrelated `IntegrityError` (e.g. a foreign
+    key violation from a bad `target_id`, simulated directly) is **not** caught
+    as `ActiveDraftExists` and propagates.
 11. **Pipeline target deduplication** (correction 6): `list_pipeline_targets`
     returns a target at most once and returns its approved `edited_body` when
     present; a target only appears after approval, never before.
@@ -806,6 +958,34 @@ writes. Covering every correction:
     **zero** outbound calls — a test patches `httpx.post` (and asserts no other
     network client is used) and confirms the approve/stage/reject paths never
     invoke it; "contacted" is only a stored stage, not a transmission.
+16. **Unapproved target cannot be advanced by direct POST** (finding 8, §0.2): a
+    target with no draft, and separately a target with only a pending/edited/
+    rejected draft, both raise `NotFound` from `set_target_stage` for every
+    stage in `STAGE_TRANSITIONS["queued"]` — including a direct DB-level call
+    bypassing the route, and a `TestClient` POST to `/targets/{id}/stage`
+    proving no stage mutation and no `target.stage_changed` audit row result.
+    `has_approved_draft` is asserted to agree with `set_target_stage`'s own
+    internal check on the same fixtures.
+17. **Scoped target/brief loader** (finding 9, §0.2): `get_target` returns
+    `None` for a cross-workspace or nonexistent id; a `TestClient` POST to
+    `/targets/{id}/draft` for a target in another workspace redirects without
+    creating a draft; for a real target, the route-level test confirms the
+    `Brief` passed to `draft_outreach` matches the campaign's persisted
+    `brief_json`.
+18. **Human-submitted body validation** (finding 10, §0.2): `save_draft_body`
+    and `approve_draft` both raise `InvalidDraftBody` for a blank, whitespace-
+    only, or over-1500-character body, with no mutation and no audit row in
+    each case; a `TestClient` POST to `/drafts/{id}/action` with an empty
+    `body` and `action=approve` returns 422 and the draft's stored status is
+    unchanged. `reject_draft` is confirmed to ignore `body` entirely (no
+    validation, since nothing is being saved).
+19. **`draft.created` audit explains the outcome** (finding 11, §0.2): for each
+    of `LLM_OK`, `NO_GEMINI_KEY`, `INVALID_GEMINI_KEY`, `GEMINI_ERROR`, and
+    `HEURISTIC_FALLBACK`, `add_draft`'s resulting audit row's `detail` contains
+    the status value (and the sanitized reason when one is set); a route-level
+    test confirms a model draft that fails the §4.4 grounding gate produces a
+    `draft.created` row distinguishable from a genuine `NO_GEMINI_KEY` run, even
+    though both end up with `model_used == "heuristic"`.
 
 ### 11.2 Manual / live verification
 
@@ -872,6 +1052,35 @@ writes. Covering every correction:
    (`/drafts/{id}/action`, `action` ∈ save/approve/reject), correction 2's stated
    preference, rather than three separate endpoints — so the current textarea
    body always reaches the server with whichever action is taken.
+10. **A stage-change attempt on a target with no approved draft resolves to the
+    same `NotFound` response as a missing/cross-workspace target** (finding 8),
+    rather than a distinguishable status. Alternative: a dedicated
+    `NotAdmitted` exception mapped to its own code (e.g. 403 or a different
+    404 variant). Rejected for this slice — the two cases share the same
+    correct user action (there's nothing to advance), and not distinguishing
+    them avoids the response itself confirming whether a given id exists in
+    this workspace at all.
+11. **Human-submitted draft bodies (Save and Approve) are held to the same
+    20–1500 character bound as the model's own output** (finding 10), via one
+    shared `validate_draft_body`. Alternative: a looser or absent bound for
+    humans, on the theory that a person editing text should be trusted more
+    than a model. Rejected — "a human approves every send" (non-negotiable #4)
+    is not satisfied by a blank approval, and reusing the model's already-
+    reasoned bound is simpler than inventing a second one.
+12. **The grounding-gate fallback (`HEURISTIC_FALLBACK`) sets a fixed,
+    non-sensitive `reason` string** (finding 11) rather than including any
+    detail about *what* the model returned (its actual body is never a safe
+    thing to echo into an audit `detail` — it's arbitrary text). The audit
+    explains *that* the model's draft was rejected and *why the category is*
+    "grounding," not exactly what the model wrote.
+13. **`add_draft` identifies the `one_active_draft_per_target` race by matching
+    the `sqlite3.IntegrityError` message text** (finding 12), since SQLite
+    does not raise a distinctly-typed exception per constraint. This is
+    slightly brittle to a SQLite message-format change across versions, but is
+    the only mechanism SQLite's Python driver offers short of a second query
+    to check "does a non-rejected draft already exist" before every insert
+    (redundant with the index itself, and reintroduces the exact race the
+    index exists to close). Flagged as a known limitation (§13).
 
 ---
 
@@ -903,3 +1112,24 @@ writes. Covering every correction:
 - Nothing sends: approval is a status change and "contacted" records that the
   human reached out — real message send stays out of scope (SPEC §7).
 - `cost_tokens` column exists from this slice but is populated in Slice 6.
+- A target's pipeline stage cannot change until one of its drafts is approved —
+  enforced by `set_target_stage` itself (an approved-draft existence check
+  inside the same transaction as the stage read), not only by what
+  `list_pipeline_targets` chooses to display. A stage-change attempt on an
+  unapproved target is indistinguishable from a missing/cross-workspace one
+  (both resolve to `NotFound`), a deliberate choice to avoid the response
+  itself confirming a target's existence in another state.
+- Human-submitted draft bodies (Save and Approve) are validated against the
+  same 20–1500 character bound as the model's own drafted output, via one
+  shared function — a blank approval would defeat the human-approval
+  non-negotiable as surely as a blank model draft would.
+- The `draft.created` audit row records the drafting outcome (`DraftResult`'s
+  status and sanitized reason), not just that a draft now exists — so
+  "no key," "key rejected," "provider error," and "model draft failed the
+  grounding gate" are all distinguishable in the audit trail even though
+  several of them share `model_used == "heuristic"`.
+- `add_draft` maps only the specific `one_active_draft_per_target` unique-index
+  violation to a dedicated `ActiveDraftExists` exception (identified by
+  matching the SQLite error message, since SQLite does not raise a distinctly
+  typed exception per constraint); every other integrity failure propagates
+  unmapped rather than being silently treated as a harmless double-submit.
