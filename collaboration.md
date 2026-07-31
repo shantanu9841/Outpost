@@ -1091,3 +1091,112 @@ or coding sessions. It complements, but does not replace:
   atomic DB functions (including `get_target`, `has_approved_draft`, and the
   four typed exceptions), then the routes/nav/UI, then the §11.1 retained
   tests (19 items), then the §11.2 no-key and live-Gemini verification.
+
+## 2026-07-31 — Slice 4 plan corrected to v2.2 (planning only, no implementation)
+
+- Contributor/environment: SDE 1 / Claude Code (Sonnet)
+- Slice: Slice 4 (drafting, approval queue, pipeline) — planning correction only
+- Role: Planner / Reviewer
+- Implementation status: Not started
+- Changes and corrections: Revised `SLICE_4_PLAN.md` from v2.1 to v2.2,
+  incorporating two more owner-flagged blocking findings, both real bugs a
+  code-level read of the v2.1 plan surfaced. (13) A genuine circular import:
+  v2.1 planned `validate_draft_body` inside `app/agent/drafting.py`, but
+  `OutreachDraft` (in `app/models.py`) needs to call it from its own field
+  validator — `models → drafting → models`. Confirmed the actual fix by
+  reading the current import graph first (`app/models.py`: stdlib/pydantic
+  only; `app/db.py`: already imports `Candidate` from `app.models` directly;
+  `app/agent/scoring.py`: imports `app.models`, not `app.db`) before deciding
+  where the function could live without creating any edge back into
+  `app.agent.*`. Moved `validate_draft_body` to a module-level function in
+  `app/models.py`; `OutreachDraft.body_is_reasonable` now calls it in the same
+  module (no import at all), `db.py` imports it from `app.models` exactly
+  where it already imports `Candidate`, and `drafting.py` needs no import of
+  it whatsoever, since every `OutreachDraft` it constructs (LLM or heuristic)
+  is validated by the schema at construction time. (14) A real concurrency
+  gap: "same transaction" (v2's correction 7) made each mutation atomic with
+  its own audit row, but did not stop two concurrent requests from both
+  reading `status = 'pending'` before either wrote, both deciding the
+  transition was legal, and both writing — e.g. two simultaneous approvals
+  both succeeding and both writing a `draft.approved` audit row, violating
+  the terminal-state and exactly-once requirements. Rather than adding
+  `BEGIN IMMEDIATE` (the alternative the finding offered), chose a conditional
+  `UPDATE ... WHERE status/stage IN (allowed source states)` plus a
+  `cursor.rowcount` check for all four mutation functions
+  (`save_draft_body`, `approve_draft`, `reject_draft`, `set_target_stage`) —
+  reasoned through and documented explicitly in a new §5.1 why this is
+  sufficient without `BEGIN IMMEDIATE`: with exactly one mutating statement
+  per function, the `WHERE` clause itself is re-evaluated at the instant
+  SQLite grants the write lock (not at an earlier Python-side read), so two
+  concurrent connections' `UPDATE`s on the same row cannot both match — this
+  relies on SQLite's ordinary writer serialization, which Python's `sqlite3`
+  module already provides via its default (unmodified) `isolation_level` and
+  connection `timeout`, so no change to `get_connection()` is needed.
+  `approve_draft`'s "flags inline edits" logic was folded into the same
+  statement via a `CASE` that compares the submitted body against the draft's
+  own **immutable** `body` column (safe to reference with no race, since nothing
+  ever writes to it after creation) rather than against a prior read of the
+  mutable `edited_body` — a small, deliberate refinement of correction 2's
+  semantics, called out explicitly as such. `set_target_stage` folds finding
+  8's approved-draft gate into the same atomic statement via a correlated
+  `EXISTS`, removing the last preliminary read from the success path
+  entirely. Both findings were threaded through every affected section (§0.3,
+  §3, §4.1, §5/§5.1, §6, §8, §9, §10, two new two-connection retained tests in
+  §11.1 — items 20 and 21 — plus two new decisions in §12/§13). A full
+  top-to-bottom read of the finished v2.2 (required before committing) found
+  and fixed one real inconsistency introduced during drafting: item 21's
+  illustrative concurrency example raced `queued → contacted` against
+  `queued → replied`, but `replied` is already invalid from `queued` under
+  the *static* transition map alone (`STAGE_TRANSITIONS["queued"] =
+  {"contacted", "declined"}`) — that example didn't actually exercise the
+  race, it just re-tested item 3's static-map check under a different name.
+  Replaced it with a genuinely race-dependent pair: `"contacted"` and
+  `"declined"`, both individually legal from `queued`, raced against each
+  other — exactly one can win, and only a real concurrency race (not the
+  static map) explains why the loser fails.
+- Files or areas affected: `SLICE_4_PLAN.md` (revised to v2.2) and this
+  `collaboration.md` entry. No application code, tests, templates, CSS,
+  schemas, `outpost.db`, or seed data were touched — planning only.
+  `PROGRESS.md` and `DECISIONS.md` were intentionally not updated (no
+  implementation yet).
+- Verification: Documentation-only change; no app code was written or run.
+  Verification consisted of reading the actual current import graph
+  (`app/models.py`, `app/db.py`, `app/agent/scoring.py`) to confirm finding
+  13's cycle was real and to ground the fix in what already exists rather
+  than assumption; reasoning through SQLite's and Python's `sqlite3` module's
+  actual locking/isolation behavior (default deferred `isolation_level`,
+  writer serialization, 5-second default connection `timeout`) to confirm the
+  conditional-`UPDATE` design genuinely closes finding 14's race without
+  `BEGIN IMMEDIATE`, rather than assuming it does; a full internal-consistency
+  read of the finished v2.2 (the pass that found and fixed the item-21
+  example above); a `grep` confirming every `validate_draft_body` mention
+  correctly points to `app.models` (and the two remaining `app.agent.drafting`
+  mentions correctly describe *avoiding* that import) and that all `§`
+  cross-references resolve to real headers; and `git diff --check` (clean;
+  only the expected Windows LF→CRLF notice).
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`, HEAD
+  `9520aa3` before this commit. `SLICE_4_PLAN.md` is the only file whose
+  content changed (plus this log entry); the application remains at the
+  Slice 3 (hardened) state — Slice 4 has not been implemented.
+- Known limitations: The conditional-`UPDATE`/`rowcount` concurrency design is
+  explicitly scoped (§12 decision 14) to functions that mutate exactly one row
+  with exactly one statement; a future function needing more than one mutating
+  statement per transaction would need `BEGIN IMMEDIATE` or an equivalent
+  revisited then. A request that cannot acquire SQLite's write lock within the
+  default 5-second connection timeout raises `sqlite3.OperationalError:
+  database is locked`, which is not specially handled — an accepted limitation
+  of a single-file local SQLite app, not something this slice engineers
+  around. The two new concurrency tests (§11.1 items 20–21) are real,
+  multi-connection, multi-threaded tests against an on-disk temp SQLite file
+  (not `:memory:`) and have not yet been run, since no code exists yet — like
+  every other retained test in this plan, they remain a specification until
+  implementation writes and runs them.
+- Next action: Owner confirms v2.2 has no further outstanding changes. Per
+  collaboration.md rule 6, implementation may then begin on Sonnet (the model
+  already active for this session) — starting with `app/models.py`
+  (`OutreachDraft` and `validate_draft_body`), then `app/agent/drafting.py`,
+  then the `draft` table + partial unique index + the §5/§5.1 DB functions
+  (including `get_target`, `has_approved_draft`, the four typed exceptions,
+  and the conditional-`UPDATE` concurrency pattern), then the routes/nav/UI,
+  then the §11.1 retained tests (21 items, including the two two-connection
+  concurrency tests), then the §11.2 no-key and live-Gemini verification.

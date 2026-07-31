@@ -4,9 +4,13 @@ Plan for Slice 4 (SPEC.md §6). This document is the single source of truth for
 Slice 4's design. No implementation has started — this commit contains only
 `SLICE_4_PLAN.md` and a `collaboration.md` log entry.
 
-This is the **v2.1** plan: v1 (`2ded7e9`) was revised to v2 for seven
-owner-approved SDE 2 corrections (§0.1), then to v2.1 for five further
-owner-flagged **blocking findings** against v2 (§0.2). All twelve tighten
+This is the **v2.2** plan: v1 (`2ded7e9`) was revised to v2 for seven
+owner-approved SDE 2 corrections (§0.1), to v2.1 for five further
+owner-flagged blocking findings against v2 (§0.2), then to v2.2 for two more
+blocking findings against v2.1 (§0.3) — a real circular import in the shared
+body-length validator, and a concurrency gap where "same transaction" made
+each mutation atomic with its own audit but did not stop two concurrent
+requests from both reading the same pre-mutation state. All fourteen tighten
 Slice 4 toward the non-negotiables (#4 audit, #5 structured output, #6
 isolation) and SPEC §4/§6's "references the cited evidence"; none expand scope
 beyond SPEC.md.
@@ -17,11 +21,12 @@ beyond SPEC.md.
   (Opus 4.8), including the drafting prompt (§4.2), because the drafting voice is
   the one genuinely writing-heavy part of this slice and SPEC.md mandates
   applying the `beautiful-prose` and `humanizer` skills to it. The v2 revision
-  was likewise a planning-only pass on Opus; **no code had changed.** This v2.1
-  revision — five more blocking findings against v2 — was made after the owner
-  switched the session to **Sonnet**; it remains planning-only (**no code has
-  changed**) and every finding was grounded against the actually-committed
-  Slice 2/3 code before being folded in, the same discipline the v2 pass used.
+  was likewise a planning-only pass on Opus; **no code had changed.** The v2.1
+  and v2.2 revisions — five, then two more, blocking findings against the prior
+  version — were made on **Sonnet** after the owner switched the session; both
+  remain planning-only (**no code has changed**) and every finding was grounded
+  against the actually-committed Slice 2/3 code before being folded in, the
+  same discipline the v2 pass used.
 - Recommended **execution model: Sonnet** — with the prompt, state machines,
   grounding gate, and atomic-audit design settled here, implementation is
   mechanical. This is the model the owner has already switched to for this
@@ -106,6 +111,33 @@ beyond SPEC.md.
     `one_active_draft_per_target` index; every other integrity failure
     propagates unmapped, so an unrelated constraint violation is never
     silently treated as a harmless double-submit (§5, §6).
+
+### 0.3 What changed from v2.1 to v2.2 (two more blocking findings)
+
+13. **The shared body-length validator moved to `app/models.py`, closing a
+    real circular import.** v2.1 planned `validate_draft_body` inside
+    `app/agent/drafting.py`, but `OutreachDraft` (which needs to call it from
+    its own field validator) lives in `app/models.py` — `models → drafting →
+    models`. The function now lives directly in `app/models.py`; `OutreachDraft`
+    calls it in the same module (no import at all), and `db.py` imports it
+    from `app.models`, exactly where `db.py` already imports `Candidate` from
+    today. `drafting.py` needs no import of it whatsoever, since every
+    `OutreachDraft` it constructs — LLM or heuristic — is validated by the
+    schema at construction time (§4.1).
+14. **"Same transaction" made a mutation atomic with its own audit row, but
+    did not by itself stop two concurrent requests from both reading the same
+    pre-mutation state and both succeeding.** `save_draft_body`, `approve_draft`,
+    `reject_draft`, and `set_target_stage` no longer read the current
+    status/stage in Python and then decide whether to write — each now issues
+    one **conditional `UPDATE ... WHERE ... AND status/stage IN (allowed
+    source states)`** and inspects `cursor.rowcount` to learn, atomically,
+    whether the transition it asked for was actually legal *at the moment the
+    write lock was granted* — not at the moment a prior read happened. This
+    relies on SQLite's own default writer serialization (§5) rather than
+    inventing a new locking scheme, and closes the race where two simultaneous
+    approvals could both read `pending`, both "decide" it was legal, and both
+    write a `draft.approved` audit row. Two new real two-connection retained
+    tests (§11.1) exercise this directly.
 
 ---
 
@@ -324,7 +356,24 @@ string (e.g. `"model draft did not pass the grounding check"`) so the
 
 ### 4.1 Structured schema (`app/models.py`)
 
+The 20–1500 character bound used below is a **module-level function in
+`app/models.py`** (not in `drafting.py` — finding 13, §0.3), so it has exactly
+one definition with no import cycle:
+
 ```python
+def validate_draft_body(text: str) -> str:
+    """Shared bound for both a model-authored and a human-submitted draft
+    body. Raises ValueError on failure; callers translate that into the
+    error shape appropriate to their layer (a Pydantic ValidationError here,
+    db.InvalidDraftBody in app/db.py)."""
+    stripped = (text or "").strip()
+    if len(stripped) < 20:
+        raise ValueError("draft body is too short to be a real message")
+    if len(stripped) > 1500:
+        raise ValueError("draft body is too long for an outreach message")
+    return stripped
+
+
 class OutreachDraft(BaseModel):
     body: str
     evidence_key: str
@@ -340,12 +389,7 @@ class OutreachDraft(BaseModel):
     @field_validator("body")
     @classmethod
     def body_is_reasonable(cls, v: str) -> str:
-        text = (v or "").strip()
-        if len(text) < 20:
-            raise ValueError("draft body is too short to be a real message")
-        if len(text) > 1500:
-            raise ValueError("draft body is too long for an outreach message")
-        return text
+        return validate_draft_body(v)
 ```
 
 The model must return the message **and** the one evidence pair it chose to
@@ -355,17 +399,23 @@ driven by `generate_structured`'s existing two-shot retry (non-negotiable #5).
 check (§4.4), exactly as Slice 3 separates `FitReason`'s schema from
 `_is_grounded`'s runtime check.
 
-The 20–1500 character bound above is pulled out into one plain function,
-`validate_draft_body(text: str) -> str` (raises `ValueError` with the same two
-messages), so it has exactly one definition. `body_is_reasonable` calls it for
-the model path; `app/db.py`'s `save_draft_body` and `approve_draft` call it too
-(finding 10, §0.2) — a **human**-submitted body is held to the same bound as a
-model-authored one. This is a deliberate choice, not an oversight: a blank or
-whitespace-only approval would defeat "a human approves every send" just as
-surely as a blank model draft would, and reusing one function means the two
-paths cannot drift to different bounds by accident (`db.py` imports it from
-`app.agent.drafting`; no circular import, since `drafting.py` does not import
-`db`).
+`app/db.py`'s `save_draft_body` and `approve_draft` import `validate_draft_body`
+directly from `app.models` — exactly where `db.py` already imports `Candidate`
+from today (finding 10, §0.2; finding 13, §0.3) — and call it on a
+human-submitted body before any mutation. A **human**-submitted body is held
+to the same bound as a model-authored one: a blank or whitespace-only approval
+would defeat "a human approves every send" just as surely as a blank model
+draft would, and one shared function means the two paths cannot drift to
+different bounds by accident. `drafting.py` never imports
+`validate_draft_body` at all — every `OutreachDraft` it constructs, whether
+from the LLM or the §4.3 heuristic, already runs the bound via the schema at
+construction time, so there is nothing left for `drafting.py` to call
+directly. This placement (in `app/models.py`, not `app/agent/drafting.py`)
+is what avoids the `models → drafting → models` cycle v2.1 would have
+introduced: `models.py` now has zero dependency on `app.agent.*` for this
+function, and `db.py`'s existing, unidirectional `db → models` import
+(already used for `Candidate`) covers the human-body path with no new edge
+in the import graph.
 
 ### 4.2 The drafting prompt (authored from `beautiful-prose` + `humanizer` + The Mom Test)
 
@@ -516,6 +566,114 @@ transaction** as the mutation (correction 7, §8) via a shared internal
 committing; the function commits once at the end, so a mutation and its audit
 row are all-or-nothing.
 
+### 5.1 Concurrency: conditional `UPDATE` + `rowcount`, not read-then-decide (finding 14, §0.3)
+
+"Same transaction" (above) makes a mutation atomic with **its own audit row**.
+It does not, by itself, stop two concurrent requests from each reading
+`status = 'pending'`, each independently deciding the transition is legal, and
+each writing — which would produce two `draft.approved` audit rows for one
+draft, violating the terminal-state and exactly-once requirements finding 14
+flagged. `save_draft_body`, `approve_draft`, `reject_draft`, and
+`set_target_stage` do **not** read the current status/stage in Python and then
+issue a separate `UPDATE`. Each instead issues **one conditional `UPDATE`**
+whose `WHERE` clause encodes every source state the transition map allows,
+and inspects `cursor.rowcount`:
+
+```python
+# approve_draft's core statement (illustrative — save_draft_body and
+# reject_draft follow the same shape with a fixed target status and no
+# edited_body logic; set_target_stage's shape is below).
+cur = conn.execute(
+    """
+    UPDATE draft
+    SET status = 'approved',
+        edited_body = CASE WHEN ? = body THEN edited_body ELSE ? END
+    WHERE workspace_id = ? AND id = ? AND status IN ('pending', 'edited')
+    """,
+    (submitted_body, submitted_body, workspace_id, draft_id),
+)
+if cur.rowcount == 1:
+    # This request's UPDATE is the one that got the write lock while the
+    # row still matched the WHERE clause -- the transition really was legal
+    # at the moment it took effect, not just at some earlier read. Safe to
+    # write the audit row in this same transaction and commit.
+    ...
+else:
+    # rowcount == 0: some further read (see below) distinguishes NotFound
+    # from InvalidTransition for the response -- but the mutation itself
+    # already, atomically, did not happen.
+    ...
+```
+
+The `edited_body` `CASE` compares `submitted_body` against the draft's own
+**immutable** `body` column (set once at creation, never written by
+`save_draft_body`/`approve_draft`/`reject_draft`) rather than against a prior
+read of `edited_body` — reading an immutable column carries no race, so this
+folds "did the human change the text" into the same atomic statement instead
+of needing a preliminary `SELECT`. (This is a minor, deliberate refinement of
+correction 2's "flags inline edits" wording: the flag now means "differs from
+the originally drafted body," which is race-free and — since it also survives
+a prior Save intact — a clearer signal than "differs from whatever a possibly
+different prior request last saved.")
+
+`save_draft_body` and `reject_draft` follow the identical shape with a fixed
+target `status` and no `CASE`. `set_target_stage` folds the §0.2/finding-8
+approved-draft gate into the **same** atomic statement via a correlated
+`EXISTS`, so there is no preliminary read in the success path at all:
+
+```python
+allowed_current = [s for s, nxt in STAGE_TRANSITIONS.items() if new_stage in nxt]
+cur = conn.execute(
+    f"""
+    UPDATE target
+    SET stage = ?
+    WHERE workspace_id = ? AND id = ?
+      AND stage IN ({",".join("?" * len(allowed_current))})
+      AND EXISTS (
+        SELECT 1 FROM draft
+        WHERE draft.workspace_id = target.workspace_id
+          AND draft.target_id = target.id
+          AND draft.status = 'approved'
+      )
+    """,
+    (new_stage, workspace_id, target_id, *allowed_current),
+)
+```
+
+On `rowcount == 0` for any of the four functions, the mutation is already,
+atomically, known not to have happened — a **diagnostic** follow-up `SELECT`
+(safe to run after the fact, since it cannot retroactively change what already
+didn't happen) distinguishes the controlled response: row absent/wrong
+workspace → `NotFound`; row present but current state not in the transition's
+allowed set → `InvalidTransition` (409) for a draft action, or (for a stage
+change) `NotFound` if there's no approved draft yet (§3.1) or, if the current
+stage already equals `new_stage`, the same-stage no-op (`False`, no audit,
+correction 1).
+
+**Why a conditional `UPDATE` instead of `BEGIN IMMEDIATE`:** each of these
+four functions performs exactly one mutating statement (plus, only on success,
+one audit `INSERT`) as its sole write. Python's `sqlite3` module's default
+`isolation_level` (unchanged from the existing `get_connection()`, which sets
+none) begins an implicit transaction lazily, at the first `INSERT`/`UPDATE`/
+`DELETE` — which is exactly this conditional `UPDATE` — and that statement
+itself re-checks the authoritative row state at the instant it acquires
+SQLite's write lock, not at some earlier Python-side read. Two concurrent
+connections' `UPDATE`s on the same row cannot both proceed at once: SQLite
+serializes writers, so the second either sees the row already changed by the
+first (and its `WHERE` clause correctly fails to match, `rowcount == 0`) or
+runs first itself — either way, exactly one succeeds. This holds without an
+explicit `BEGIN IMMEDIATE`, and is simpler to reason about than one, because
+the single statement's `WHERE` clause **is** the concurrency guard — there is
+no separate "read" step whose result could go stale. The subsequent audit
+`INSERT` (same connection, same still-open transaction) cannot be interleaved
+with another writer either, since the write lock taken by the `UPDATE` is held
+until `commit()`. Python's `sqlite3` default connection `timeout` (5 seconds,
+unchanged) is far more than these single-statement transactions ever need to
+wait for each other; a request that still can't acquire the lock inside that
+window raises `sqlite3.OperationalError: database is locked`, which is not
+specially handled — an honest limitation of a single-file local SQLite app
+(§12, §13), not something this slice engineers around.
+
 Four small typed exceptions signal controlled failures to the routes (kept in
 `db.py`, imported by `main.py` and the tests):
 
@@ -579,25 +737,30 @@ def list_pending_drafts(workspace_id) -> list[Row]
 def save_draft_body(workspace_id, draft_id, edited_body, actor="human") -> None
     # validate_draft_body(edited_body) first (finding 10, §0.2) -> raises
     # InvalidDraftBody on blank/over-long, before touching the DB. Then the
-    # transition guard: current status must allow 'edited' (pending|edited).
-    # Sets edited_body, status='edited'; writes draft.edited audit; one txn.
-    # Illegal (approved/rejected) -> InvalidTransition. Missing -> NotFound.
+    # conditional UPDATE ... WHERE status IN ('pending','edited') (§5.1,
+    # finding 14) -> rowcount==1: sets edited_body, status='edited', writes
+    # draft.edited audit, one txn. rowcount==0: a diagnostic read distinguishes
+    # NotFound (missing/cross-workspace) from InvalidTransition (already
+    # approved/rejected).
 
 def approve_draft(workspace_id, draft_id, submitted_body, actor="human") -> None
     # validate_draft_body(submitted_body) first (finding 10) -> InvalidDraftBody
     # on blank/over-long, before touching the DB -- a crafted blank-body POST
-    # cannot approve empty text. Then the transition guard: current status must
-    # allow 'approved' (pending|edited). If submitted_body (the CURRENT
-    # textarea text) differs from the stored (edited_body or body), set
-    # edited_body = submitted_body in THIS operation (correction 2 — no lost
-    # edits). Set status='approved'. Write ONE draft.approved audit (detail
-    # flags "approved with inline edits" when the body changed). All in one
-    # transaction.
+    # cannot approve empty text. Then the conditional UPDATE ... WHERE status IN
+    # ('pending','edited') (§5.1, finding 14): sets status='approved' and, via a
+    # CASE comparing submitted_body against the row's own immutable body column,
+    # sets edited_body = submitted_body only when it differs from the original
+    # draft (correction 2 — no lost edits, computed race-free in the same
+    # statement). rowcount==1 -> write ONE draft.approved audit (detail flags
+    # inline edits when the body differed from the original) in the same
+    # transaction. rowcount==0 -> diagnostic read for NotFound vs
+    # InvalidTransition, same as save_draft_body.
 
 def reject_draft(workspace_id, draft_id, actor="human") -> None
-    # transition guard allows 'rejected' from pending|edited. status='rejected';
-    # draft.rejected audit; one txn. Illegal -> InvalidTransition. (Reject
-    # discards whatever text was in the textarea -- there is nothing to
+    # Conditional UPDATE ... WHERE status IN ('pending','edited') sets
+    # status='rejected' (§5.1, finding 14). rowcount==1 -> draft.rejected audit,
+    # one txn. rowcount==0 -> diagnostic NotFound/InvalidTransition, as above.
+    # (Reject discards whatever text was in the textarea -- there is nothing to
     # validate or save.)
 
 def list_pipeline_targets(workspace_id) -> list[Row]
@@ -608,27 +771,31 @@ def list_pipeline_targets(workspace_id) -> list[Row]
     # Both workspace_ids qualified.
 
 def set_target_stage(workspace_id, target_id, new_stage, actor="human") -> bool
-    # Reads the target scoped to this workspace (missing -> NotFound). Checks
-    # for an approved draft for this target IN THE SAME TRANSACTION (finding 8,
-    # §0.2) -- none -> NotFound (identical response to a missing target; see
-    # §3.1's rationale for not distinguishing the two). Same stage -> no-op,
-    # returns False, NO audit (correction 1). new_stage not in
-    # STAGE_TRANSITIONS[current] -> InvalidTransition (409). Else UPDATE stage +
-    # target.stage_changed audit (detail "old -> new") in one transaction;
-    # returns True.
+    # Conditional UPDATE ... WHERE stage IN (allowed source stages for
+    # new_stage) AND EXISTS (an approved draft for this target) (§5.1,
+    # finding 14) -- folds the finding-8 approved-draft gate into the same
+    # atomic statement, no preliminary read needed for the success path.
+    # rowcount==1 -> target.stage_changed audit (detail "old -> new") in one
+    # transaction; returns True. rowcount==0 -> a diagnostic read distinguishes:
+    # target missing/cross-workspace/no-approved-draft -> NotFound (identical
+    # response to a missing target; see §3.1's rationale for not distinguishing
+    # the two); current stage already equals new_stage -> no-op, returns False,
+    # NO audit (correction 1); anything else -> InvalidTransition (409).
 ```
 
 - The audit row every function writes includes the correct `workspace_id`,
   `campaign_id`, `target_id`, and `draft_id`: the draft functions look up the
   target's `campaign_id` (and `target_id`) via the scoped join in the same
-  transaction; the stage function reads `campaign_id` from the target row it
-  already fetched.
+  transaction; the stage function reads `campaign_id` from the target row
+  (an immutable field once set, so reading it — even after the conditional
+  `UPDATE` above — carries no race).
 - `STAGES`, `STAGE_SET`, `STAGE_TRANSITIONS`, `DRAFT_STATUSES`, and
   `DRAFT_TRANSITIONS` (§3.1) are module constants in `db.py` — one source of
   truth for the DB guard, the routes, and the tests.
-- `validate_draft_body` (§4.1) is imported from `app.agent.drafting` — one
-  definition of the 20–1500 character bound, used by the Pydantic schema for
-  model output and by `db.py` for human-submitted bodies alike (finding 10).
+- `validate_draft_body` (§4.1) is imported from `app.models` — one definition
+  of the 20–1500 character bound, used by the Pydantic schema for model output
+  and by `db.py` for human-submitted bodies alike (finding 10, §0.2; moved out
+  of `app.agent.drafting` in finding 13, §0.3, to avoid a circular import).
 - The existing `db.add_audit` (separate connection/commit) stays for the Slice
   2/3 intake/discovery/scoring rows; it is refactored to delegate to the shared
   `_insert_audit` helper so there is one audit-insert code path. Slice 4's new
@@ -807,7 +974,7 @@ and typo-proof:
 |---|---|---|
 | `draft.created` | agent | `add_draft` (detail = `DraftResult.status.value`, plus `: {reason}` when set — e.g. `heuristic_fallback: model draft did not pass the grounding check`, `invalid_gemini_key: <sanitized reason>` — finding 11, §0.2) |
 | `draft.edited` | human | `save_draft_body` |
-| `draft.approved` | human | `approve_draft` (detail flags inline edits when the body changed at approval) |
+| `draft.approved` | human | `approve_draft` (detail flags inline edits when `submitted_body` differs from the draft's original `body`, computed race-free in the same statement — §5.1) |
 | `draft.rejected` | human | `reject_draft` |
 | `target.stage_changed` | human | `set_target_stage` (detail = "queued -> contacted"); **no row on a same-stage no-op** |
 
@@ -830,13 +997,18 @@ phrase or a sensible default, so an unmapped action never crashes the page.
   slice demos start to finish with no keys.
 - **#4 human approves every send + audit:** a draft is inert text until a human
   acts; approve/reject/edit/stage each write **exactly one** audit row **in the
-  same transaction** as the change (§8); **nothing is ever transmitted** —
-  "approved" is a status, and marking "contacted" is the owner recording that
-  *they* reached out (SPEC §7: real send integration is out of scope). A
-  target's stage cannot move at all until a human has approved a draft for
-  it — enforced by `set_target_stage` itself, not only by what the pipeline
-  page displays (finding 8, §0.2) — and neither Save nor Approve can persist a
-  blank or malformed human edit (finding 10, §0.2).
+  same transaction** as the change (§8), and this holds even under two
+  concurrent requests for the same draft or target — the conditional-`UPDATE`
+  design (§5.1, finding 14) means only one request's mutation can ever match,
+  so exactly one audit row is written, never two, and the terminal states
+  (approved/rejected/live/declined) stay genuinely terminal under a race, not
+  just under sequential use. **Nothing is ever transmitted** — "approved" is a
+  status, and marking "contacted" is the owner recording that *they* reached
+  out (SPEC §7: real send integration is out of scope). A target's stage
+  cannot move at all until a human has approved a draft for it — enforced by
+  `set_target_stage` itself, not only by what the pipeline page displays
+  (finding 8, §0.2) — and neither Save nor Approve can persist a blank or
+  malformed human edit (finding 10, §0.2).
 - **#5 structured output:** the LLM path returns a validated `OutreachDraft`
   (body + evidence pair) with the existing two-shot retry, then the §4.4
   grounding gate on top.
@@ -855,17 +1027,23 @@ phrase or a sensible default, so an unmapped action never crashes the page.
 
 **New:**
 - `app/agent/drafting.py` (schema-driven LLM path + neutral heuristic + §4.4
-  grounding gate + the shared `validate_draft_body` bound, finding 10).
+  grounding gate). Does **not** define or import `validate_draft_body`
+  (finding 13, §0.3) — every `OutreachDraft` it builds is validated by the
+  schema at construction time.
 - `app/templates/approvals.html`, `app/templates/pipeline.html`.
 - `tests/test_slice4_drafting.py` (retained — §11.1).
 
 **Modified:**
-- `app/models.py` — `OutreachDraft` (body + evidence_key + evidence_value).
+- `app/models.py` — `OutreachDraft` (body + evidence_key + evidence_value);
+  module-level `validate_draft_body` (finding 13, §0.3 — moved here from
+  `drafting.py` to avoid a `models → drafting → models` cycle).
 - `app/db.py` — `draft` table + partial unique index in `init()`; `get_target`
-  (finding 9); the §5 draft/pipeline functions (atomic mutation+audit, tenancy
-  guard, transition guards, body validation, the approved-draft gate on stage
-  changes); `has_approved_draft` (finding 8); `STAGES`/`STAGE_SET`/
-  `STAGE_TRANSITIONS`/`DRAFT_STATUSES`/`DRAFT_TRANSITIONS` constants;
+  (finding 9); the §5/§5.1 draft/pipeline functions (atomic mutation+audit,
+  tenancy guard, conditional-`UPDATE` transition guards with `rowcount`
+  checks — finding 14 — body validation via `app.models.validate_draft_body`,
+  the approved-draft gate folded into `set_target_stage`'s own `UPDATE`);
+  `has_approved_draft` (finding 8); `STAGES`/`STAGE_SET`/`STAGE_TRANSITIONS`/
+  `DRAFT_STATUSES`/`DRAFT_TRANSITIONS` constants;
   `NotFound`/`InvalidTransition`/`InvalidDraftBody`/`ActiveDraftExists`
   (findings 8/10/12); the shared `_insert_audit` helper (`add_audit`
   refactored to delegate to it).
@@ -891,7 +1069,12 @@ commit** touches only `SLICE_4_PLAN.md` and `collaboration.md`.
 ### 11.1 Retained tests (`tests/test_slice4_drafting.py`)
 
 Mocked (no real provider call, no real key), temp SQLite, no `outpost.db`
-writes. Covering every correction:
+writes. Covering every correction. Items 20–21 (finding 14, §0.3) are the
+exception to "mocked": they need two *real*, separate `sqlite3` connections
+against the same on-disk temp file (never `:memory:`, which is not shared
+across connections) to actually exercise SQLite's writer serialization —
+consistent with every other test here already using a real temp file rather
+than an in-memory DB.
 
 1. **Schema:** `OutreachDraft` rejects a blank/too-short/over-long body and a
    blank `evidence_key`/`evidence_value`; accepts a normal message with a pair.
@@ -986,6 +1169,36 @@ writes. Covering every correction:
     test confirms a model draft that fails the §4.4 grounding gate produces a
     `draft.created` row distinguishable from a genuine `NO_GEMINI_KEY` run, even
     though both end up with `model_used == "heuristic"`.
+20. **Concurrent double-approve produces exactly one approval** (finding 14,
+    §0.3): a `pending` draft is set up in the shared temp SQLite file; two
+    threads, each opening its own `sqlite3` connection via `db.get_connection()`
+    (exactly as two real requests would), call `db.approve_draft(...)` with
+    slightly different `submitted_body` values, released as close to
+    simultaneously as a thread `Barrier` allows. Asserts: exactly one call
+    returns normally and the other raises `InvalidTransition`; the draft's
+    final `status` is `approved` exactly once (never toggled or corrupted);
+    exactly **one** `draft.approved` audit row exists, and its `detail`/final
+    `edited_body` correspond to whichever call actually won — never a mix of
+    both, and never two rows. The same shape is repeated for two concurrent
+    `reject_draft` calls, and for one concurrent `approve_draft` +
+    `reject_draft` pair on the same `pending` draft (exactly one of the two
+    terminal states wins, the other gets `InvalidTransition`).
+21. **Concurrent stage submission cannot bypass the transition machine**
+    (finding 14, §0.3), two sub-cases, both via two separate connections on a
+    target with an approved draft, currently `queued`: (a) two threads
+    simultaneously call `db.set_target_stage(..., "contacted")` with the
+    *same* requested stage — exactly one returns `True`, the other is a
+    same-stage no-op (`False`, since by the time its `UPDATE` runs the stage
+    already reads `contacted`), and never two `target.stage_changed` audit
+    rows. (b) two threads simultaneously request *different* stages that are
+    each individually legal from `queued` (`"contacted"` and `"declined"` —
+    both are in `STAGE_TRANSITIONS["queued"]`, so this genuinely exercises the
+    race rather than the already-illegal jump item 3 covers) — exactly one
+    succeeds (`True`) and lands the target on whichever stage won; the other
+    raises `InvalidTransition` (not a no-op — its requested stage differs from
+    the one that actually landed), because by the time its `UPDATE` runs the
+    target is no longer `queued`. Either way, the target ends on exactly one
+    of the two requested stages, never both, and never a third.
 
 ### 11.2 Manual / live verification
 
@@ -1081,6 +1294,29 @@ writes. Covering every correction:
     to check "does a non-rejected draft already exist" before every insert
     (redundant with the index itself, and reintroduces the exact race the
     index exists to close). Flagged as a known limitation (§13).
+14. **Concurrency safety for the four mutation functions is a conditional
+    `UPDATE ... WHERE <allowed source states>` plus a `cursor.rowcount` check,
+    not an explicit `BEGIN IMMEDIATE`** (finding 14, §5.1). Alternative: open
+    every mutating function with `conn.execute("BEGIN IMMEDIATE")` to take the
+    write lock before any read. Rejected — with exactly one mutating statement
+    per function, the conditional `UPDATE`'s `WHERE` clause already **is** the
+    concurrency guard (SQLite re-checks it at write-lock time, not at an
+    earlier read), so a second, separate locking step would be redundant
+    machinery for the same guarantee, and would still need the same
+    `rowcount`-style check afterward to know whether the caller's intended
+    transition actually happened. If a future function in this module ever
+    needs more than one mutating statement per transaction, `BEGIN IMMEDIATE`
+    (or a compensating check) should be revisited then — this decision is
+    scoped to functions that mutate exactly one row with exactly one
+    statement.
+15. **`validate_draft_body` lives in `app/models.py`, not `app/agent/drafting.py`**
+    (finding 13, §0.3) — closing a real circular import (`models → drafting →
+    models`) that v2.1 would have shipped. This is a straightforward
+    placement fix rather than a judgment call with a real alternative: the
+    function's only two callers are `OutreachDraft`'s own validator (same
+    module, needs no import) and `db.py` (which already imports from
+    `app.models` for `Candidate`), so `app/models.py` is the only location
+    that serves both without introducing a new edge in the import graph.
 
 ---
 
@@ -1133,3 +1369,16 @@ writes. Covering every correction:
   matching the SQLite error message, since SQLite does not raise a distinctly
   typed exception per constraint); every other integrity failure propagates
   unmapped rather than being silently treated as a harmless double-submit.
+- The four Slice 4 mutation functions (`save_draft_body`, `approve_draft`,
+  `reject_draft`, `set_target_stage`) enforce their transition guards via a
+  conditional `UPDATE ... WHERE <allowed source states>` plus a
+  `cursor.rowcount` check, not a read-then-decide pattern and not an explicit
+  `BEGIN IMMEDIATE` — the `WHERE` clause is re-evaluated at the moment SQLite
+  grants the write lock, so two concurrent requests for the same draft or
+  target cannot both succeed; only one `rowcount == 1`, and the audit row is
+  written exactly once. `set_target_stage` folds the approved-draft gate into
+  the same statement via a correlated `EXISTS`.
+- `validate_draft_body` lives in `app/models.py`, called directly by
+  `OutreachDraft`'s own field validator (same module) and imported by
+  `app/db.py` for human-submitted bodies — not in `app/agent/drafting.py`,
+  which would have created a `models → drafting → models` circular import.
