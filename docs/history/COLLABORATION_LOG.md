@@ -1563,3 +1563,58 @@ or coding sessions. It complements, but does not replace:
   approval and the model-switch checkpoint, implementation may begin on
   Sonnet, starting with the §7.2 live error-shape verification before wiring
   the sources, route, scoring, audit, and UI. Do not implement until then.
+
+## 2026-07-31 — Slice 5 plan corrected after owner review (planning only)
+
+- Contributor/environment: SDE 1 / Claude Code.
+- Slice: Slice 5 (creator sources and demo mode) — planning only.
+- Role: Planner.
+- Implementation status: Not started.
+- Changes and corrections: Applied the six owner-required corrections to
+  docs/plans/SLICE_5_PLAN.md. (1) Made the LLM scoring path target-type-aware,
+  not only the heuristic: SYSTEM_PROMPT and _build_prompt in
+  app/agent/scoring.py currently say 'candidate company' and omit target_type,
+  so a creator campaign scored by Gemini would get a business prompt; the plan
+  now selects business vs creator prompt wording by brief.target_type and
+  carries target_type into the prompt, preserving business wording and leaving
+  the prompt-independent heuristic (and its anchor scores) unchanged. (2)
+  Replaced token-in-URL transport with header authentication — Apify
+  'Authorization: Bearer' and YouTube 'X-goog-api-key' — so no request URL is
+  credential-bearing, per official Apify guidance. (3) Replaced the
+  run-sync-get-dataset-items endpoint with start-run + bounded polling and
+  explicit caps: per-request httpx timeout (30s), actor-run timeout (120s),
+  poll budget (150s), maxItems (search limit), and maxTotalChargeUsd (0.10),
+  all verified against docs.apify.com/api/v2 and the act-runs POST reference;
+  run-lifecycle terminal states added to the §5.4 status mapping. (4)
+  Corrected the false 'never duplicated into SQLite' statement: BYO-keys are
+  stored once in workspace-scoped workspace_setting.key_value (masked) and
+  never copied into scripts, logs, audit details, URLs, screenshots, or
+  tracked files. (5) Specified the exact creator follower bands
+  (10k-500k -> 25; 1k-9,999 or 500,001-2M -> 15; <1k or >2M -> 5; missing ->
+  0), their inclusive boundary behavior with a per-boundary test list, and the
+  practical 85-point ceiling when country is absent (common on IG/TikTok). (6)
+  Renamed the creator seed-load failure action to discovery.creator_seed_error
+  to avoid colliding with business discovery.seed_error in the globally keyed
+  BANNER_BY_ACTION/ACTION_LABELS maps, and added a non-collision test.
+- Files or areas affected: docs/plans/SLICE_5_PLAN.md (revised), collaboration.md
+  (handoff and recent activity), and this history entry. No application code,
+  tests, seeds, templates, styles, schema, or dependency files were touched.
+- Verification: Documentation-only change. Re-verified the Apify Bearer-header
+  recommendation and the timeout/maxItems/maxTotalChargeUsd run parameters
+  against official Apify API docs before citing them. Confirmed the target
+  branch clean, staged only the intended documentation files, ran
+  git diff --check, and scanned the staged diff for credential-shaped values
+  (none) and non-.md files (none).
+- Last known working state: Branch codex/sde-1-slice-2-hardening; the previous
+  planning commit (963a90b) plus this corrections commit change only
+  documentation. The application remains at the verified Slice 4 state.
+- Known limitations: Apify/YouTube HTTP-status and run-lifecycle mappings, the
+  actor output field names and defaultDatasetId shape, the follower bands (a
+  demo heuristic, not a calibrated model), and the pricing/quota figures remain
+  best-current information to be re-verified live before being relied upon. A
+  live creator end-to-end still depends on the owner providing a free YouTube
+  and/or Apify key.
+- Next action: Owner and SDE 2 review the corrected docs/plans/SLICE_5_PLAN.md.
+  After approval and the model-switch checkpoint, implementation may begin on
+  Sonnet, starting with the §7.2 live error-shape verification. Do not
+  implement until then.

@@ -87,7 +87,8 @@ implementation, per `CLAUDE.md`.
 ## 3. Non-negotiables honored
 
 - **BYO-key.** YouTube uses the workspace `youtube` key; Apify uses the
-  workspace `apify` token via Apify's REST run-sync endpoint. The builder
+  workspace `apify` token via Apify's REST start-run and polling endpoints,
+  authenticated with an `Authorization: Bearer` header (§4.0). The builder
   never supplies or is billed for a provider key.
 - **Demo mode.** With zero keys, a creator campaign completes end to end on
   creator seed data.
@@ -106,14 +107,52 @@ Pricing and quota facts are **time-sensitive**; verification date and official
 sources are recorded below. Live HTTP-status → typed-status mappings in §5.4
 are **assumptions** until confirmed by the §7.2 verification script.
 
+### 4.0 Apify transport, authentication, and run caps (shared by both actors)
+
+Corrections 2 and 3: never put the token in a URL, and bound every run's
+duration and cost.
+
+- **Authentication — header, never query param (correction 2).** All Apify
+  requests send `Authorization: Bearer <workspace apify key>`. The token is
+  never a query parameter, so no request URL is ever credential-bearing.
+  Official Apify guidance: "Using your token in the request header is more
+  secure than using it as a URL parameter because URLs are often stored in
+  browser history and server logs"
+  (https://docs.apify.com/api/v2). `_safe_reason` still redacts any echoed
+  token defensively.
+- **Start-run + bounded polling, not run-sync (correction 3).** Apify's
+  `run-sync-get-dataset-items` endpoint waits up to 300 s on one held
+  connection and is not robust for a new integration. Instead:
+  1. **Start:** `POST https://api.apify.com/v2/acts/<actorId>/runs` with the
+     JSON input body and the Bearer header, plus run-bounding query
+     parameters (all confirmed official at
+     https://docs.apify.com/api/v2/act-runs-post):
+     - `timeout=<run_timeout_secs>` — hard actor-run duration cap (default
+       **120**).
+     - `maxItems=<N>` — caps the number of charged pay-per-result items
+       (set to the per-actor search limit, default **10**).
+     - `maxTotalChargeUsd=<cap>` — hard ceiling on total run cost (default
+       **0.10**).
+     - `memory=<MB>` — left at the actor default unless tuning is needed.
+  2. **Poll:** `GET https://api.apify.com/v2/actor-runs/<runId>` with the
+     Bearer header, every ~3 s, until the run reaches a terminal status
+     (`SUCCEEDED`, `FAILED`, `ABORTED`, `TIMED-OUT`) or a **wall-clock poll
+     budget (default 150 s)** is exhausted.
+  3. **Fetch:** on `SUCCEEDED`, `GET
+     https://api.apify.com/v2/datasets/<defaultDatasetId>/items` (the run's
+     `defaultDatasetId`) with the Bearer header.
+  - **Per-request `httpx` timeout** is a separate, strict cap (default
+    **30 s**) on each individual start/poll/fetch call, independent of the
+    actor-run `timeout`.
+  - **Status handling:** a non-`SUCCEEDED` terminal status or an exhausted
+    poll budget maps to `PROVIDER_ERROR` (run failure) or `NETWORK_ERROR`
+    (transport/timeout) per §5.4, never a raise. All defaults above are
+    single named constants in `apify.py`, easy for the owner to adjust.
+
 ### 4.1 Apify — Instagram (`apify/instagram-scraper`, id `shu8hvrXbJbY3Eb9W`)
 
-- **Transport:** `POST
-  https://api.apify.com/v2/acts/apify~instagram-scraper/run-sync-get-dataset-items?token=<workspace apify key>`
-  with a JSON input body; returns dataset items directly (synchronous, same
-  `httpx` shape as `apollo.py`). The token is a query parameter, so the
-  request URL is credential-bearing and must never be logged or interpolated
-  into a reason (mirrors `llm.py`'s Gemini-URL handling).
+- **Transport/auth/caps:** per §4.0 (Bearer header, start-run + bounded
+  polling, per-run item and cost caps).
 - **Discovery input (creator search):**
   `{"resultsType": "details", "search": <niche>, "searchType": "user",
   "searchLimit": N}` (default `N = 10`).
@@ -123,8 +162,7 @@ are **assumptions** until confirmed by the §7.2 verification script.
 
 ### 4.2 Apify — TikTok (`clockworks/tiktok-scraper`, id `GdWCkxBtKWOsKjdch`)
 
-- **Transport:** `POST
-  https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=<workspace apify key>`.
+- **Transport/auth/caps:** per §4.0.
 - **Discovery input (creator search):**
   `{"searchQueries": [<niche>], "searchSection": "/user",
   "maxProfilesPerQuery": N}` (default `N = 10`). Note the schema's own caveat:
@@ -146,10 +184,14 @@ provider-controlled and may change; re-verify before relying on a figure.
 
 ### 4.4 YouTube Data API v3
 
-- **Transport:** `GET
-  https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=<niche>&maxResults=N&key=<workspace youtube key>`,
-  then one batched `channels.list?part=snippet,statistics&id=<comma-joined
-  ids>&key=…` to enrich with `subscriberCount` and channel `country`.
+- **Transport:** `GET https://www.googleapis.com/youtube/v3/search` with
+  `part=snippet&type=channel&q=<niche>&maxResults=N`, then one batched
+  `GET .../youtube/v3/channels` with `part=snippet,statistics&id=<comma-joined
+  ids>` to enrich with `subscriberCount` and channel `country`. The key is
+  sent in the **`X-goog-api-key` request header**, not the `key=` query
+  parameter, for the same reason as Apify (correction 2) — no request URL is
+  credential-bearing. Each call has a strict per-request `httpx` timeout
+  (default 30 s), and `_safe_reason` redacts any echoed key defensively.
 - **Quota (official, 2026-07-31 —
   https://developers.google.com/youtube/v3/determine_quota_cost):**
   `search.list` has its **own dedicated bucket, default 100 calls/day at 1
@@ -215,9 +257,13 @@ any future multi-sub-source provider.
 ### 5.3 `ApifySource` (merge + precedence)
 
 `ApifySource.search(brief)` runs a private per-actor helper twice (Instagram,
-then TikTok), each returning `(candidates, sub_status, sub_reason)` with the
-§5.4 mapping and a sanitizing `_safe_reason` (never key/URL/raw payload). It
-then combines:
+then TikTok). Each helper performs the §4.0 start-run → bounded-poll → fetch
+sequence for its actor and returns `(candidates, sub_status, sub_reason)` with
+the §5.4 mapping and a sanitizing `_safe_reason` (never key/URL/raw payload).
+The two runs are sequential and each is bounded by the §4.0 per-request
+timeout, actor-run `timeout`, poll budget, `maxItems`, and
+`maxTotalChargeUsd`, so total latency and spend are strictly capped. It then
+combines:
 
 - **Both OK** → `SourceResult(merged, OK, "apify", "apify", None)`.
 - **Exactly one OK** → `SourceResult(that platform's candidates,
@@ -242,27 +288,32 @@ provenance is lost.
 
 ### 5.4 Live HTTP-status → typed-status mappings (ASSUMPTIONS — verify in §7.2)
 
-- **Apify (per actor):** `401` → `INVALID_KEY`; `402`/`403` →
-  `INSUFFICIENT_PLAN` (out of credit / plan limit); `429` → `RATE_LIMITED`;
-  `httpx.RequestError`/timeout → `NETWORK_ERROR`; any other non-2xx or a
-  malformed 2xx body → `PROVIDER_ERROR`. A run-sync response is a JSON array of
-  dataset items; a non-array or item-shape violation is `PROVIDER_ERROR`, never
-  a raise.
+- **Apify (per actor).** On the *start-run* call: `401` → `INVALID_KEY`;
+  `402`/`403` → `INSUFFICIENT_PLAN` (out of credit / plan limit); `429` →
+  `RATE_LIMITED`; `httpx.RequestError`/per-request timeout → `NETWORK_ERROR`;
+  any other non-2xx → `PROVIDER_ERROR`. On the *run lifecycle*: a terminal
+  status of `FAILED`/`ABORTED`/`TIMED-OUT`, or an exhausted poll budget, →
+  `PROVIDER_ERROR`; a transport error while polling/fetching → `NETWORK_ERROR`.
+  The dataset-items body is a JSON array; a non-array or item-shape violation
+  is `PROVIDER_ERROR`, never a raise.
 - **YouTube:** `400` with an "API key not valid" message or `403` reason
   `keyInvalid` → `INVALID_KEY`; `403` reason `quotaExceeded`/`rateLimitExceeded`
   → `RATE_LIMITED`; timeout/transport → `NETWORK_ERROR`; else → `PROVIDER_ERROR`.
 
-These remain explicitly labelled assumptions in code comments and in
-`PROGRESS.md`'s "Known limitations" until §7.2 confirms them live, exactly as
-Slice 2 did for Apollo/Gemini.
+Because both providers authenticate via a request header (§4.0, §4.4), no
+request URL is credential-bearing; `_safe_reason` additionally redacts any
+echoed token/key. These status mappings remain explicitly labelled assumptions
+in code comments and in `PROGRESS.md`'s "Known limitations" until §7.2 confirms
+them live, exactly as Slice 2 did for Apollo/Gemini.
 
 ### 5.5 `YouTubeSource`
 
 `search(brief)` performs the `search.list` channel query, then one batched
-`channels.list` enrichment, maps to `Candidate` (`source="youtube"`), and
-returns a `SourceResult`. Never raises past its boundary; `_safe_reason`
-sanitizes. Requires the workspace `youtube` key (decision 5); the caller only
-constructs it when that key is present.
+`channels.list` enrichment (both authenticated via the `X-goog-api-key` header,
+§4.4), maps to `Candidate` (`source="youtube"`), and returns a `SourceResult`.
+Never raises past its boundary; `_safe_reason` sanitizes. Requires the
+workspace `youtube` key (decision 5); the caller only constructs it when that
+key is present.
 
 ---
 
@@ -303,7 +354,34 @@ holds `brief.target_type` at the call site (step 7 of `create_campaign`), so
 this is a one-line change there plus the registry. Recorded as an active
 decision in `DECISIONS.md`.
 
-### 6.3 Scoring — creator heuristic branch (decision 3)
+Scoring has two paths — the LLM path and the deterministic heuristic — and
+**both** must become target-type-aware (correction 1). Today's business
+wording lives in `app/agent/scoring.py`.
+
+#### 6.3.1 LLM path — target-type-aware prompt (correction 1)
+
+The current `SYSTEM_PROMPT` says "You score how well each candidate **company**
+fits a **business's** outreach campaign," and `_build_prompt` sends the brief
+fields but **not** `target_type`. A creator campaign scored with Gemini would
+therefore be told to score companies — wrong. The plan makes the prompt
+target-type-aware:
+
+- `SYSTEM_PROMPT` becomes two wordings selected by `brief.target_type`: the
+  business wording is preserved verbatim (so business LLM behavior is
+  unchanged), and a creator wording scores "how well each **creator** fits the
+  campaign," citing a specific evidence field/value from that creator's own
+  evidence (same grounded-citation contract).
+- `_build_prompt(brief, evidence_list)` includes `target_type` and labels each
+  row's evidence appropriately (creator vs company). It already emits
+  `niche_or_industry`, `audience`, `product`, and `target_countries`, which are
+  meaningful for both types.
+- `score_batch`/`FitBatch`/`FitAssessment`/`FitReason` schemas, the two-shot
+  validation retry, grounding (`_is_grounded`), and `assert_grounded` are
+  unchanged and shape-agnostic — only the prompt text and the `target_type`
+  it carries change. The heuristic is prompt-independent, so this change
+  cannot move any business or creator heuristic score.
+
+#### 6.3.2 Heuristic path — creator branch (decision 3)
 
 `_heuristic()` branches on `brief.target_type`:
 
@@ -311,13 +389,38 @@ decision in `DECISIONS.md`.
   0–15. Byte-identical; the Slice 3 anchor-score tests must still pass.
 - **creator (new, additive):** niche/bio overlap 0–**60** (reusing
   `_significant_niche_tokens` / stemming against the `niche` field), followers
-  band 0–**25** (creator-appropriate reason text — never "employees" or
+  band 0–**25** (§6.3.3, creator-appropriate reason text — never "employees" or
   "distribution/logistics"), country 0–**15**. Every emitted reason cites a
-  present, nonblank evidence value; the name-only final fallback and
+  present, nonblank evidence value; a component whose field is missing
+  contributes 0 and emits no reason; the name-only final fallback and
   `assert_grounded` generalize unchanged.
 
-`ScoreStatus`, `score_batch`, `assert_grounded`, and the "no score without a
-grounded citation" guarantees are unchanged and shape-agnostic.
+#### 6.3.3 Creator follower bands (correction 5)
+
+The 0–25 follower component uses these exact, inclusive bands on the integer
+`followers` evidence value (chosen for outreach fit: an established but still
+reachable micro/mid creator scores highest; a tiny account or an
+out-of-reach mega account scores lowest):
+
+| Followers (inclusive) | Points | Reason text |
+|---|---|---|
+| 10,000 – 500,000 | **25** | "Audience size (N followers) is a strong fit for creator outreach" |
+| 1,000 – 9,999, or 500,001 – 2,000,000 | **15** | "Audience size (N followers) is a moderate fit" |
+| < 1,000, or > 2,000,000 | **5** | "Audience size (N followers) is outside the ideal range" |
+| missing / non-integer | **0** | (no reason emitted) |
+
+Boundary behavior (explicit, mirroring the business band's inclusive style):
+`999`→5, `1,000`→15, `9,999`→15, `10,000`→25, `500,000`→25, `500,001`→15,
+`2,000,000`→15, `2,000,001`→5. `followers` is coerced via `coerce_int`, so a
+`bool`, `NaN`/`inf`, non-integral float, or unparseable string becomes missing
+(0 points, no reason), never a crash. §7.1 adds a boundary test for each pair.
+
+**Practical maximum without country.** Instagram and TikTok profiles commonly
+have **no country** field, so their country component scores 0 and the
+practical maximum for such a creator is **85** (60 niche + 25 followers), not
+100. This is expected and honest — a missing field never fabricates a citation
+— and the seed spread (§7.4) and tests treat 85 as the effective creator
+ceiling where country is absent.
 
 ### 6.4 Audit and banners (`app/audit_banners.py`)
 
@@ -333,7 +436,17 @@ actions + banners selected by `source_attempted`, following the existing
 - `discovery.creator_invalid_key`, `discovery.creator_insufficient_plan`,
   `discovery.creator_rate_limited`, `discovery.creator_provider_error`,
   `discovery.creator_network_error` (**warning**, source-accurate wording),
-- creator `discovery.seed_error` (**warning**).
+- `discovery.creator_seed_error` (**warning**).
+
+**No action-key collision (correction 6):** `BANNER_BY_ACTION` and
+`ACTION_LABELS` are global, single-namespace maps keyed by action string.
+Business discovery already owns `discovery.seed_error`, so the creator
+seed-load failure uses the distinct `discovery.creator_seed_error` (never the
+business key). Every creator discovery action above is likewise namespaced
+(`discovery.creator_*`, `discovery.youtube_ok`, `discovery.apify_ok`,
+`discovery.apify_partial`, `discovery.no_creator_key`) so no creator entry can
+overwrite or be overwritten by a business entry. A test asserts the business
+and creator discovery maps share no action key.
 
 `main.py` selects the business vs creator map by `discovery_result.
 source_attempted`. All banner detail is the already-sanitized `reason`; no raw
@@ -374,15 +487,29 @@ criteria, each with at least one test:
 7. **Creator scoring:** the seed spread (§7.4) produces a demonstrable ranking
    — strong > partial > geographic-mismatch/weak > irrelevant — with grounded,
    creator-appropriate reasons; every score has ≥1 grounded citation.
-8. **Business-score regression protection:** the Slice 3 anchor-score table
-   and business heuristic outputs are unchanged (existing tests re-run green;
-   an explicit assertion pins a business anchor).
-9. **Tenant isolation:** creator targets, audit rows, and drafts never cross
-   workspaces (scoped query checks, as in Slice 2/4).
-10. **Sanitized audit details:** no test fixture or asserted audit/banner
+8. **Follower boundary bands (correction 5):** one test per §6.3.3 boundary
+   pair — `999`/`1,000`, `9,999`/`10,000`, `500,000`/`500,001`,
+   `2,000,000`/`2,000,001` — asserting the exact points, plus a
+   missing/non-integer `followers` case scoring 0 with no reason, plus a
+   country-absent creator whose total is capped at the practical maximum of
+   **85**.
+9. **Target-type-aware LLM prompt (correction 1):** with the LLM mocked, a
+   creator campaign's built prompt/system text describes creators (not
+   "candidate company") and carries `target_type`, while a business campaign's
+   prompt is unchanged; both still parse and ground identically.
+10. **Business-score regression protection:** the Slice 3 anchor-score table
+    and business heuristic outputs are unchanged (existing tests re-run green;
+    an explicit assertion pins a business anchor).
+11. **Audit action-key non-collision (correction 6):** the business and
+    creator discovery maps share no action key; every creator entry resolves
+    through `BANNER_BY_ACTION`/`ACTION_LABELS` to its own creator-worded
+    banner/label.
+12. **Tenant isolation:** creator targets, audit rows, and drafts never cross
+    workspaces (scoped query checks, as in Slice 2/4).
+13. **Sanitized audit details:** no test fixture or asserted audit/banner
     string contains a key, a credential-bearing URL, or a raw provider payload;
     an injected fake key inside a provider error is redacted before audit.
-11. **Zero-key demo (integration-style, mocked/seed):** creator campaign →
+14. **Zero-key demo (integration-style, mocked/seed):** creator campaign →
     seed discovery → creator scoring → draft → approve → pipeline completes.
 
 ### 7.2 Live error-shape verification (deletable script, §14.1 pattern)
@@ -395,9 +522,13 @@ since it requires live keys). Until it runs, §5.4 stays marked as assumptions.
 ### 7.3 Live happy-path (only if the owner provides keys)
 
 If the owner pastes a `youtube` and/or `apify` key into a workspace via
-Settings (never duplicated into SQLite), verify one live creator campaign
-end to end. Otherwise verification is seed + mocked, which is honest but not a
-live end-to-end — recorded as a limitation.
+Settings, verify one live creator campaign end to end. The key is stored once
+in local, workspace-scoped SQLite (`workspace_setting.key_value`, masked in the
+UI) — that is where BYO-keys live (correction 4). It is never copied into
+scripts, logs, audit details, request URLs, screenshots, or any tracked file,
+and provider code consumes it only via `db.get_settings()`. Otherwise
+verification is seed + mocked, which is honest but not a live end-to-end —
+recorded as a limitation.
 
 ### 7.4 Creator seed spread (decision 4)
 
@@ -439,14 +570,22 @@ and `docs/history/COLLABORATION_LOG.md`.
 
 ## 9. Remaining assumptions requiring live verification
 
-- Apify and YouTube HTTP-status → typed-status mappings (§5.4) are assumptions
-  until the §7.2 script confirms them live (only Apollo's were confirmed in
-  Slice 2).
+- Apify and YouTube HTTP-status → typed-status mappings, including the Apify
+  run-lifecycle terminal states (§5.4), are assumptions until the §7.2 script
+  confirms them live (only Apollo's were confirmed in Slice 2). The header-auth
+  scheme (Bearer for Apify, `X-goog-api-key` for YouTube) and the run-bounding
+  parameters (`timeout`, `maxItems`, `maxTotalChargeUsd`) are confirmed against
+  official docs (§4.0, §4.4); their exact runtime behavior under error is part
+  of what §7.2 verifies.
 - Provider pricing (§4.3) and the YouTube quota model (§4.4) are current as of
   2026-07-31 and provider-controlled; re-verify before relying on a figure.
-- Exact Apify output field names (e.g. TikTok `fans` vs `followers`) are taken
-  from the official schemas/READMEs and should be confirmed against a real
-  dataset item during implementation; the normalizer must tolerate a missing
-  field (→ `None`) rather than raise.
+- Exact Apify output field names (e.g. TikTok `fans` vs `followers`) and the
+  run's `defaultDatasetId` shape are taken from the official schemas/READMEs
+  and should be confirmed against a real run/dataset item during
+  implementation; the normalizer must tolerate a missing field (→ `None`)
+  rather than raise.
+- The creator follower bands (§6.3.3) are a demo-mode heuristic choice, not a
+  calibrated model; thresholds are documented so behavior is deterministic and
+  testable, not because they are externally validated.
 - Live creator end-to-end (§7.3) depends on the owner providing a free YouTube
   and/or Apify key; absent that, verification is seed + mocked.
