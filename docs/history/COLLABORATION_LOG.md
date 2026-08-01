@@ -2168,3 +2168,16 @@ or coding sessions. It complements, but does not replace:
   (llm.py's header-auth-plus-usage refactor, drafting.py's widened
   DraftResult, and models.py first, then eval.py/routing.py, then DB/route/
   UI wiring, then the section 6 verification). Do not implement until then.
+
+## 2026-08-01 — Slice 6 plan corrected to v4 (planning only)
+
+- Contributor/environment: Codex / SDE 2 in the shared Outpost workspace.
+- Slice: Slice 6 — evaluation and cost-aware routing.
+- Role: Implementation reviewer and owner-authorized correction implementer.
+- Implementation status: Planning only. No Slice 6 application code, tests, schema, templates, styles, seeds, or dependencies were changed.
+- Changes and corrections: Applied the final three review corrections against v3 (`4026021`). Invalid Gemini credentials are now terminal after every model-backed routing stage: default draft, default eval, escalated draft, and escalated eval; each stage has an explicit retained call-count/fallback case and preserves accumulated usage. Replaced the default-model pricing placeholders with the official `gemini-3.6-flash` paid list prices verified on 2026-08-01 ($1.50 per million input tokens and $7.50 per million output tokens, with thinking included in output). Replaced binary-float and component-wise rounding with string-constructed `Decimal` rates, exact per-attempt accumulation, and one final `ROUND_HALF_UP` to integer micro-USD. Preserved the approved independently nullable `cost_tokens` and `estimated_cost_microusd` semantics.
+- Files or areas affected: `docs/plans/SLICE_6_PLAN.md`, `collaboration.md`, and this history entry only.
+- Verification: `git diff --check` passed; the changed-file list contained documentation only; targeted stale-placeholder and credential-pattern scans returned no matches; `python -m unittest discover -s tests` passed all 212 retained tests. No live or paid provider call was made.
+- Last known working state: Branch `codex/sde-1-slice-2-hardening`; application baseline remains `b640b49` at the completed Slice 5 state. The v4 plan is based on v3 planning commit `4026021`.
+- Known limitations: The stronger escalation-model id and its pricing remain deliberately owner-gated and unverified. Slice 6 cannot be marked complete against `SPEC.md` until the owner approves that model and the required safe verification gate passes. The `thoughtsTokenCount` derivation remains an explicitly documented assumption for optional safe verification.
+- Next action: Owner performs final review of `docs/plans/SLICE_6_PLAN.md` v4. Do not begin Slice 6 implementation until the owner explicitly approves the plan and confirms the required model switch.

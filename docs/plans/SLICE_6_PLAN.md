@@ -1,8 +1,8 @@
 # Slice 6 Plan — Evaluation and cost-aware routing
 
-**Status:** Planning only (draft for owner review). This is **v3**,
-correcting five further SDE 2 review findings against v2 (`cc2c23c`), which
-itself corrected ten findings against v1 (`2f991a5`) — see §0 for the full
+**Status:** Planning only (draft for owner review). This is **v4**,
+correcting three final SDE 2 review findings against v3 (`4026021`), which
+followed the v1→v2 and v2→v3 correction passes — see §0 for the full
 correction history. No application code, tests, templates, or schema change
 is part of this document. Implementation does not begin until the owner
 approves this plan, confirms no changes remain outstanding, and confirms the
@@ -40,8 +40,8 @@ against that state before coding.
    per-token-type breakdown priced at each attempt's own model's rates —
    **corrected further in §0.2 correction 2**, which removes the separate
    "thinking" rate v2 still had.
-6. **Terminal invalid-key behavior.** A rejected key discovered during
-   default drafting is terminal for the whole routing request.
+6. **Terminal invalid-key behavior.** The first rejected-key outcome at any
+   model-backed routing stage is terminal for the rest of that request.
 7. **Exactly one eval per draft.** The `eval` table declares
    `draft_id INTEGER NOT NULL UNIQUE REFERENCES draft(id)`.
 8. **Complete heuristic rubric.** Fully specified all four 0–25 dimensions,
@@ -55,7 +55,7 @@ against that state before coding.
 Also resolved in v2: paid-tier opt-in storage as a dedicated, idempotently
 migrated `workspace.paid_tier_enabled` column, default off.
 
-### 0.2 v2 → v3 (five corrections, `cc2c23c` → this commit)
+### 0.2 v2 → v3 (five corrections, `cc2c23c` → `4026021`)
 
 1. **Only "no request issued" may equal zero cost.** §4.2/§4.3/§4.4 are
    corrected so that *every* issued Gemini HTTP attempt — including a
@@ -97,6 +97,25 @@ migrated `workspace.paid_tier_enabled` column, default off.
    `_call_gemini` for the usage/model changes, this correction folds into
    that same refactor rather than being deferred; §2's "out of scope"
    exclusion for this is removed.
+
+### 0.3 v3 → v4 (three corrections, `4026021` → this commit)
+
+1. **Invalid credentials are terminal after every model-backed stage.**
+   §5.3 now checks after default drafting, default evaluation, escalated
+   drafting, and escalated evaluation. The first
+   `INVALID_GEMINI_KEY` outcome prevents every later Gemini request in the
+   routing operation, while preserving usage already accumulated and
+   completing with the appropriate grounded heuristic result.
+2. **Default-model pricing is verified, not placeholder text.** §4.4 records
+   the official paid list prices verified on 2026-08-01 for
+   `gemini-3.6-flash`: **$1.50 per million input tokens** and **$7.50 per
+   million output tokens**, with output including thinking tokens. The
+   owner-gated escalation model and its pricing remain deferred.
+3. **Decimal pricing and explicit rounding.** §4.4/§5.5 replace binary
+   `float` rates and component-wise `round()` with `Decimal` values created
+   from strings. Exact per-attempt micro-USD contributions are summed first;
+   the outreach total is rounded once to an integer micro-USD using
+   `ROUND_HALF_UP`. Boundary tests retain this contract.
 
 ---
 
@@ -425,21 +444,32 @@ before this list is built.
     even when the top-line totals are `NULL`, never a fabricated number.
 
 **Dollar estimate formula (§0.2 correction 2 — corrects v2's blended
-"thinking" rate):**
+"thinking" rate; §0.3 corrections 2–3 verify rates and decimal rounding):**
 
 ```python
+from decimal import Decimal, ROUND_HALF_UP
+
 # app/agent/routing.py — time-sensitive, provider-controlled; re-verify
 # against the official Gemini API pricing page before relying on a figure
 # (same discipline as Slice 5's Apify/YouTube pricing — SLICE_5_PLAN.md §4.3).
 # Only two rates per model: Google prices output inclusive of thinking
 # tokens for these tool-free structured-output requests, so there is no
 # separate "thinking" rate to configure.
-PRICING_USD_PER_MILLION_TOKENS: dict[str, dict[str, float]] = {
-    "gemini-3.6-flash": {"input": <verify>, "output": <verify>},
+PRICING_USD_PER_MILLION_TOKENS: dict[str, dict[str, Decimal]] = {
+    "gemini-3.6-flash": {
+        "input": Decimal("1.50"),
+        "output": Decimal("7.50"),
+    },
     # ESCALATION_MODEL's entry is added once the owner approves that model
     # id and its official pricing is verified (decision 5/6).
 }
 ```
+
+These `gemini-3.6-flash` paid list prices were verified on **2026-08-01**
+against Google's official current-model documentation:
+<https://ai.google.dev/gemini-api/docs/latest-model>. Reading public pricing
+documentation is not a paid API call. Rates remain provider-controlled and
+must be re-verified before a later release changes them.
 
 For one `TokenUsage` entry, its priced contribution requires
 `prompt_tokens` and `total_tokens` both known, non-negative, and
@@ -450,16 +480,23 @@ independent of whatever `_extract_usage` already enforced — the same
 `PRICING_USD_PER_MILLION_TOKENS`:
 
 ```
-input_cost_microusd  = round(prompt_tokens × input_rate)
-output_cost_microusd = round((total_tokens − prompt_tokens) × output_rate)
-attempt_cost_microusd = input_cost_microusd + output_cost_microusd
+attempt_cost_microusd = (
+    Decimal(prompt_tokens) * input_rate
+    + Decimal(total_tokens - prompt_tokens) * output_rate
+)
+
+# Sum every exact Decimal attempt contribution first, then round once.
+estimated_cost_microusd = int(
+    total_exact_microusd.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+)
 ```
 
 (`input_rate`/`output_rate` are USD per **million** tokens; a microUSD is
 1e-6 USD, so `tokens × (USD per 1e6 tokens)` already equals the cost in
 microUSD directly — no further unit conversion factor is needed. This is
 worth stating explicitly in the implementation so the `1_000_000` doesn't
-get applied twice or inverted.) `candidates_tokens`/`thinking_tokens` are
+get applied twice or inverted.) Rates are constructed from strings as
+`Decimal`, never binary floats. `candidates_tokens`/`thinking_tokens` are
 **not** read for pricing at all — they remain in `TokenUsage` purely for
 display/visibility (§0.2 correction 2), never required or consulted by
 `_price`.
@@ -469,17 +506,11 @@ outreach's** `estimated_cost_microusd` `NULL` — one bad entry cannot be
 silently skipped and the rest summed, since that would understate cost
 without saying so.
 
-The exact numeric rates are **not fabricated in this plan** — they are
-placeholders to be filled from the live, official Gemini pricing page
-immediately before implementation (not part of this correction pass, and
-not a "paid live call": reading a public pricing page is not a billed API
-request). Implementation must not proceed with a guessed number.
-
 `estimated_cost_microusd` is an integer count of millionths of a US dollar
-so the stored figure never drifts from floating-point rounding, and a
-later change to `PRICING_USD_PER_MILLION_TOKENS` can never retroactively
-alter a historical draft's stored estimate — only future drafts see a new
-rate.
+computed with explicit decimal arithmetic and one final `ROUND_HALF_UP`, so
+the stored figure has no binary-floating-point drift. A later pricing-table
+change cannot retroactively alter a historical draft's stored estimate —
+only future drafts see a new rate.
 
 **Billing language:** "default model" replaces "free model"/"free tier"
 everywhere in this plan and in the UI copy it specifies (§5.7). Default
@@ -743,35 +774,40 @@ Called by `create_draft` in place of the direct `draft_outreach` call:
 
 1. **Default draft.** `drafting.draft_outreach(brief, target, settings)` —
    heuristic if no key, default model if key present. Collect its `usage`.
-2. **Terminal invalid-key check.** If the default draft's `status ==
-   DraftStatus.INVALID_GEMINI_KEY`, this key is now known-rejected for the
-   remainder of the request:
-   - Eval is called with `known_invalid_key_reason` set (§5.2) — **no**
-     live judge call.
-   - Escalation eligibility is forced to `False` regardless of
-     `paid_tier_enabled`/fit — **no** escalation call. Audit
-     `routing.invalid_key_terminal`.
-   - Skip directly to step 6 (cost).
-3. **Eval the default draft.** `eval.evaluate_draft(brief, target,
-   default_body, settings)`. Collect its `usage`.
-4. **Escalation eligibility (all required, only reached if step 2 did not
-   trigger):** `settings.get("gemini")` present **and**
-   `paid_tier_enabled` (the parameter, not a lookup) **and**
-   `target["fit_score"] >= HIGH_FIT_THRESHOLD` **and** `ESCALATION_MODEL is
-   not None`.
-   - Not eligible for any reason except a set-but-inapplicable
-     `ESCALATION_MODEL` → keep the default draft/eval, no extra audit.
-   - Eligible on (gemini key + opt-in + fit) but `ESCALATION_MODEL is None`
-     → keep default, audit `routing.escalation_unavailable` (never
-     silent).
-5. **Confidence early-exit / escalate.** If eligible and `ESCALATION_MODEL`
-   is set:
-   - Default eval's `score >= CONFIDENCE_THRESHOLD` → keep the default
-     draft, audit `routing.early_exit`.
-   - Else → `drafting.draft_outreach(brief, target, settings,
-     model=ESCALATION_MODEL)`, collect its usage, `eval.evaluate_draft(...)`
-     the escalated body, collect that usage, keep the escalated
-     body/eval/model. Audit `routing.escalated`.
+2. **Terminal check after default drafting.** If the default draft's `status
+   == DraftStatus.INVALID_GEMINI_KEY`:
+   - Evaluate its grounded heuristic body with `known_invalid_key_reason`
+     set (§5.2), which issues **no** judge request.
+   - Force escalation ineligible, audit `routing.invalid_key_terminal`
+     with sanitized detail naming `default_draft`, and skip to cost.
+3. **Evaluate the default draft.** Call `eval.evaluate_draft(brief, target,
+   default_body, settings)` and collect its `usage`. If the returned
+   `EvalStatus == INVALID_GEMINI_KEY`, keep the default body and its
+   heuristic eval result, audit `routing.invalid_key_terminal` with
+   sanitized detail naming `default_eval`, and skip escalation entirely.
+4. **Escalation eligibility (only after both terminal checks pass):**
+   `settings.get("gemini")` present **and** `paid_tier_enabled` (the
+   parameter, not a lookup) **and** `target["fit_score"] >=
+   HIGH_FIT_THRESHOLD` **and** `ESCALATION_MODEL is not None`.
+   - Not eligible for an ordinary reason → keep the default draft/eval, no
+     extra routing audit.
+   - Eligible on key + opt-in + fit but `ESCALATION_MODEL is None` → keep
+     default and audit `routing.escalation_unavailable`.
+5. **Confidence early-exit / escalation with terminal checks.**
+   - Default eval `score >= CONFIDENCE_THRESHOLD` → keep the default
+     draft and audit `routing.early_exit`.
+   - Otherwise call `drafting.draft_outreach(...,
+     model=ESCALATION_MODEL)` and collect its usage.
+   - If escalated drafting returns `INVALID_GEMINI_KEY`, issue **no**
+     escalated-eval request; retain the already-valid default body/eval,
+     audit `routing.invalid_key_terminal` with sanitized detail naming
+     `escalated_draft`, and skip to cost.
+   - Otherwise evaluate the escalated body and collect the evaluator's usage.
+     If that evaluator returns `INVALID_GEMINI_KEY`, make no later Gemini
+     call, keep the escalated body with its deterministic fallback eval, and
+     audit `routing.invalid_key_terminal` with sanitized detail naming
+     `escalated_eval`. Otherwise keep the escalated body/eval/model and
+     audit `routing.escalated`.
 6. **Cost.** `cost_breakdown` = the concatenation of every `usage` list
    collected above, in the order collected. `cost_tokens` /
    `estimated_cost_microusd` computed per §4.4. `model_used` = the model
@@ -821,7 +857,7 @@ def _price(cost_breakdown: list[TokenUsage]) -> tuple[int | None, int | None]:
     if all(u.total_tokens is not None for u in cost_breakdown):
         cost_tokens = sum(u.total_tokens for u in cost_breakdown)
 
-    estimated_cost_microusd = 0
+    exact_microusd = Decimal("0")
     for usage in cost_breakdown:
         rates = PRICING_USD_PER_MILLION_TOKENS.get(usage.model)
         if (
@@ -829,13 +865,15 @@ def _price(cost_breakdown: list[TokenUsage]) -> tuple[int | None, int | None]:
             or usage.prompt_tokens < 0 or usage.total_tokens < usage.prompt_tokens
             or rates is None
         ):
-            estimated_cost_microusd = None
-            break
-        estimated_cost_microusd += (
-            round(usage.prompt_tokens * rates["input"])
-            + round((usage.total_tokens - usage.prompt_tokens) * rates["output"])
+            return cost_tokens, None
+        exact_microusd += (
+            Decimal(usage.prompt_tokens) * rates["input"]
+            + Decimal(usage.total_tokens - usage.prompt_tokens) * rates["output"]
         )
 
+    estimated_cost_microusd = int(
+        exact_microusd.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
     return cost_tokens, estimated_cost_microusd
 ```
 
@@ -970,19 +1008,23 @@ no live call, no real key, temp SQLite).
 **§0.2 correction 2 — corrected pricing formula:**
 
 7. **Pricing uses prompt tokens at the input rate and all remaining total
-   tokens at the output rate.** For a mocked `TokenUsage(prompt_tokens=P,
-   total_tokens=T, ...)`, `_price` produces
-   `round(P × input_rate) + round((T − P) × output_rate)` exactly — not a
-   formula that reads `candidates_tokens` or `thinking_tokens` at all.
-8. **`PRICING_USD_PER_MILLION_TOKENS` has no `"thinking"` key.** A
-   structural test asserts the pricing table's per-model dict only ever
-   contains `"input"`/`"output"`.
-9. **Mixed-model pricing is never blended.** An outreach with a
-   default-model attempt (mocked P1/T1) and an escalated attempt (mocked
-   P2/T2, a different mocked per-model rate pair) produces
-   `estimated_cost_microusd == price(P1, T1, flash_rates) + price(P2, T2,
-   escalation_rates)` — never a single blended rate or the final model's
-   rate applied to the combined total.
+   tokens at the output rate, with one final rounding step.** For each
+   `TokenUsage(prompt_tokens=P, total_tokens=T, ...)`, `_price` adds
+   `Decimal(P) × input_rate + Decimal(T − P) × output_rate` to an exact
+   outreach-level Decimal accumulator. It rounds that accumulator exactly
+   once with `ROUND_HALF_UP`. It never reads `candidates_tokens` or
+   `thinking_tokens` for pricing. Boundary fixtures immediately below,
+   exactly at, and immediately above a half-microUSD prove the rounding rule
+   and prove component-wise/per-attempt rounding is not used.
+8. **The verified default pricing table is exact and has no thinking rate.**
+   A structural test asserts the `gemini-3.6-flash` entry contains only
+   `input=Decimal("1.50")` and `output=Decimal("7.50")`, and that
+   no per-model dict contains a `"thinking"` key.
+9. **Mixed-model pricing is never blended or prematurely rounded.** An
+   outreach with default-model and escalation-model attempts uses each
+   attempt's own Decimal rate pair, sums all exact contributions, and rounds
+   the combined result once — never a blended rate, the final model's rate
+   on the combined tokens, or a sum of already-rounded attempt costs.
 10. **Invalid prompt/total combinations make the estimate unknown, not
     silently skipped.** `total_tokens < prompt_tokens`, a negative
     `prompt_tokens`, or a `model` absent from the pricing table each make
@@ -1044,11 +1086,15 @@ no live call, no real key, temp SQLite).
     `fit_score = 84` not escalated, `fit_score = 85` escalated
     (`HIGH_FIT_THRESHOLD`); eligible target with default eval `score = 79`
     escalates, `score = 80` early-exits (`CONFIDENCE_THRESHOLD`).
-22. **Terminal invalid-key call count.** When the default draft's Gemini
-    call returns a mocked 403/`INVALID_GEMINI_KEY`, the total number of
-    mocked Gemini HTTP calls for the whole `route_and_draft` request is
-    exactly `1`, even when the target is high-fit and
-    `paid_tier_enabled=True`.
+22. **Invalid credentials are terminal after every model-backed stage.**
+    Retained call-count cases cover: (a) invalid default draft → exactly one
+    Gemini call; (b) successful default draft then invalid default eval →
+    exactly two calls and no escalation; (c) successful default draft/eval
+    then invalid escalated draft → exactly three calls and no escalated eval;
+    and (d) invalid escalated eval → no later Gemini call. Every case retains
+    usage already accumulated, completes through the specified grounded
+    fallback, and audits `routing.invalid_key_terminal` with the sanitized
+    stage name.
 23. **Escalation unavailable is never silent.** Key + opt-in + high-fit but
     `ESCALATION_MODEL is None` → no escalation,
     `routing.escalation_unavailable` audited, default draft/eval kept.
@@ -1131,11 +1177,7 @@ Modified: `app/llm.py`, `app/agent/drafting.py`, `app/models.py`,
   `SPEC.md` until the owner approves a specific `ESCALATION_MODEL` and it
   passes a safe verification gate. This is expected to remain open past
   this plan's approval.
-- **`gemini-3.6-flash`'s exact current per-million-token input/output
-  rates** (§4.4 — now only two rates per model, not three) are left as
-  explicit placeholders, to be filled from the official Gemini pricing
-  page immediately before implementation — not fabricated in this plan,
-  and not requiring a paid call to look up.
+
 - **The `thoughtsTokenCount`-derivation rule** (§4.2/§0.2 correction 3) is
   this plan's own interpretation of safe derivation for tool-free
   structured-output calls; flagged in case the owner wants the "safe live
@@ -1143,13 +1185,7 @@ Modified: `app/llm.py`, `app/agent/drafting.py`, `app/models.py`,
   `gemini-3.6-flash` responses ever report `thoughtsTokenCount` at all, and
   if not, whether the `total == prompt + candidates` boundary actually
   holds in practice.
-- **`cost_tokens`/`estimated_cost_microusd` decoupling** (§4.4/§5.5) is a
-  deliberate refinement beyond the literal correction text — the plan
-  treats a known token *count* and a known token *price* as independently
-  knowable facts about the same attempt, rather than force-coupling their
-  unknown-ness. Flagged for owner confirmation; the simpler, fully-coupled
-  alternative (either both known or both `NULL`, together) remains
-  available if preferred.
+
 - **Eval prompt wording** (§5.2) is not fully drafted in this document —
   left to implementation, constrained by needing to describe the same four
   0–25 dimensions the heuristic uses.
