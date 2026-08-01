@@ -13,7 +13,10 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import contextmanager
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -27,6 +30,19 @@ from app.agent import eval as eval_mod
 from app.agent.drafting import DraftStatus
 from app.agent.eval import EvalStatus
 from app.models import Brief, EvalDimension, EvalResult, EvalRubric, OutreachDraft
+
+
+@contextmanager
+def _escalation_enabled(model="escalation-fake", input_rate="2.00", output_rate="4.00"):
+    """Patch both ESCALATION_MODEL and a matching pricing entry — after the
+    review correction requiring verified pricing before escalation can run
+    (finding 3), a model id alone is no longer enough to make
+    `routing._escalation_ready()` true."""
+    with mock.patch.object(routing, "ESCALATION_MODEL", model), mock.patch.dict(
+        routing.PRICING_USD_PER_MILLION_TOKENS,
+        {model: {"input": Decimal(input_rate), "output": Decimal(output_rate)}},
+    ):
+        yield
 
 
 # --- Shared fixtures (mirrors test_slice4_drafting.py's pattern) -----------
@@ -475,7 +491,7 @@ class ThresholdInclusivityTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.MeasuredResult(_eval_result(50), [_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 2)
         self.assertEqual(outcome.routing_action, "default")
@@ -490,7 +506,7 @@ class ThresholdInclusivityTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.MeasuredResult(_eval_result(90), [_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 4)
         self.assertEqual(outcome.routing_action, "escalated")
@@ -505,7 +521,7 @@ class ThresholdInclusivityTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.MeasuredResult(_eval_result(90), [_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 4)
         self.assertEqual(outcome.routing_action, "escalated")
@@ -516,7 +532,7 @@ class ThresholdInclusivityTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.MeasuredResult(_eval_result(80), [_usage()]),
             ],
-        ) as gen2, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen2, _escalation_enabled():
             outcome2 = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen2.call_count, 2)
         self.assertEqual(outcome2.routing_action, "early_exit")
@@ -549,7 +565,7 @@ class InvalidKeyTerminalTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "bad", usage=[_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 2)
         self.assertEqual(outcome.routing_action, "invalid_key_terminal")
@@ -566,7 +582,7 @@ class InvalidKeyTerminalTests(unittest.TestCase):
                 llm.MeasuredResult(_eval_result(50), [_usage()]),  # below confidence -> escalate
                 llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "bad", usage=[_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 3)
         self.assertEqual(outcome.routing_action, "invalid_key_terminal")
@@ -585,7 +601,7 @@ class InvalidKeyTerminalTests(unittest.TestCase):
                 llm.MeasuredResult(_grounded_draft(target), [_usage()]),
                 llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "bad", usage=[_usage()]),
             ],
-        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "escalation-fake"):
+        ) as gen, _escalation_enabled():
             outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
         self.assertEqual(gen.call_count, 4)
         self.assertEqual(outcome.routing_action, "invalid_key_terminal")
@@ -900,6 +916,333 @@ class HeuristicRubricTests(unittest.TestCase):
             + result.rubric.non_genericness.points + result.rubric.clear_ask.points
         )
         self.assertEqual(result.score, total)
+
+
+# =============================================================================
+# Implementation review finding 1 — durable per-target generation reservation
+# =============================================================================
+
+
+class DraftGenerationReservationTests(_DBFixture, unittest.TestCase):
+    def test_second_acquire_is_refused_while_first_is_active(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        first = db.try_acquire_draft_generation(ws, target_id)
+        self.assertIsNotNone(first)
+        second = db.try_acquire_draft_generation(ws, target_id)
+        self.assertIsNone(second)
+
+    def test_release_allows_reacquisition(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        first = db.try_acquire_draft_generation(ws, target_id)
+        db.release_draft_generation(ws, target_id, first)
+        second = db.try_acquire_draft_generation(ws, target_id)
+        self.assertIsNotNone(second)
+
+    def test_cross_workspace_independence(self):
+        ws_a, camp_a = self._setup_campaign("A")
+        ws_b, camp_b = self._setup_campaign("B")
+        target_a = self._make_target(ws_a, camp_a)
+        target_b = self._make_target(ws_b, camp_b)
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws_a, target_a))
+        # A different workspace's reservation is entirely independent, even
+        # though nothing here shares a target id.
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws_b, target_b))
+
+    def test_release_is_scoped_and_cannot_release_another_workspaces_reservation(self):
+        ws_a, camp_a = self._setup_campaign("A")
+        ws_b, _camp_b = self._setup_campaign("B")
+        target_id = self._make_target(ws_a, camp_a)
+        reservation = db.try_acquire_draft_generation(ws_a, target_id)
+        db.release_draft_generation(ws_b, target_id, reservation)  # wrong workspace -> no-op
+        self.assertIsNone(db.try_acquire_draft_generation(ws_a, target_id))  # still held
+
+    def test_expired_reservation_is_reclaimable(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO draft_generation (workspace_id, target_id, expires_at)
+                VALUES (?, ?, datetime('now', '-10 seconds'))
+                """,
+                (ws, target_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # The stale row is already expired -- a fresh acquire must reclaim
+        # it rather than treat the target as permanently blocked.
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws, target_id))
+
+    def test_acquire_transaction_does_not_block_other_writers(self):
+        """The acquire itself must not hold a database-wide write lock open
+        across anything resembling a network call -- prove a completely
+        unrelated write can proceed immediately after an acquire returns."""
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        reservation = db.try_acquire_draft_generation(ws, target_id)
+        self.assertIsNotNone(reservation)
+        # If the acquire's transaction were still open, this second,
+        # unrelated write would hang or raise "database is locked".
+        other_ws = db.create_workspace("unrelated")
+        self.assertIsInstance(other_ws, int)
+
+    def test_concurrent_requests_only_one_generates(self):
+        """Two threads race to generate a draft for the same target. Only
+        one may ever reach routing.route_and_draft (i.e. issue provider
+        calls); the loser must be turned away before generating anything."""
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        workspace_row = db.get_workspace(ws)
+
+        call_count = 0
+        count_lock = threading.Lock()
+
+        def fake_route(*args, **kwargs):
+            nonlocal call_count
+            with count_lock:
+                call_count += 1
+            time.sleep(0.15)  # make the race window wide and deterministic
+            return routing.RoutingOutcome(
+                body="Hi there, a concurrency test outreach body text today.",
+                model_used="heuristic",
+                eval_result=_eval_result(0),
+                eval_status=EvalStatus.NO_GEMINI_KEY,
+                cost_breakdown=[],
+                cost_tokens=0,
+                estimated_cost_microusd=0,
+                routing_action="default",
+            )
+
+        barrier = threading.Barrier(2)
+
+        def worker():
+            from app.main import create_draft
+
+            barrier.wait(timeout=5)
+            create_draft(target_id, workspace=workspace_row)
+
+        with mock.patch("app.main.routing.route_and_draft", side_effect=fake_route):
+            t1 = threading.Thread(target=worker)
+            t2 = threading.Thread(target=worker)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+
+        self.assertEqual(call_count, 1)
+        self.assertEqual(len(db.list_pending_drafts(ws)), 1)
+        # The reservation was released by the winner, so the target is not
+        # left permanently blocked.
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws, target_id))
+
+    def test_failed_generation_releases_the_reservation(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        workspace_row = db.get_workspace(ws)
+
+        with mock.patch(
+            "app.main.routing.route_and_draft", side_effect=RuntimeError("provider blew up")
+        ):
+            from app.main import create_draft
+
+            with self.assertRaises(RuntimeError):
+                create_draft(target_id, workspace=workspace_row)
+
+        # The failure must not leave the target permanently blocked.
+        reservation = db.try_acquire_draft_generation(ws, target_id)
+        self.assertIsNotNone(reservation)
+
+
+# =============================================================================
+# Implementation review finding 2 — invalid escalated draft keeps the default
+# =============================================================================
+
+
+class EscalationFailurePreservesDefaultTests(unittest.TestCase):
+    def _brief(self) -> Brief:
+        return Brief(
+            product="p", audience="a", tone="t", target_type="business",
+            niche_or_industry="n", target_countries=["United States"],
+        )
+
+    def test_provider_error_during_escalated_draft_keeps_default(self):
+        target = _target_dict(fit_score=95)
+        default = _grounded_draft(target)
+        with mock.patch(
+            "app.llm.generate_structured_with_usage",
+            side_effect=[
+                llm.MeasuredResult(default, [_usage()]),
+                llm.MeasuredResult(_eval_result(50), [_usage()]),  # below confidence -> escalate
+                llm.LLMError(llm.LLMErrorKind.ERROR, "provider boom", usage=[_usage()]),
+            ],
+        ) as gen, _escalation_enabled():
+            outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
+        self.assertEqual(gen.call_count, 3)  # no escalated-eval call was made
+        self.assertEqual(outcome.routing_action, "escalation_failed")
+        self.assertIn("gemini_error", outcome.routing_detail)
+        self.assertIn("provider boom", outcome.routing_detail)
+        self.assertEqual(outcome.body, default.body)
+        self.assertEqual(outcome.model_used, llm.GEMINI_MODEL)  # the default model, not escalated
+        self.assertEqual(outcome.eval_result.score, 50)  # the default eval, kept
+        self.assertEqual(len(outcome.cost_breakdown), 3)  # the failed attempt's usage is preserved
+
+    def test_grounding_failure_during_escalated_draft_keeps_default(self):
+        target = _target_dict(fit_score=95)
+        default = _grounded_draft(target)
+        ungrounded = OutreachDraft(
+            body="Hi there, this message does not cite the real evidence at all today.",
+            evidence_key="industry",
+            evidence_value="Something completely fabricated",
+        )
+        with mock.patch(
+            "app.llm.generate_structured_with_usage",
+            side_effect=[
+                llm.MeasuredResult(default, [_usage()]),
+                llm.MeasuredResult(_eval_result(50), [_usage()]),
+                llm.MeasuredResult(ungrounded, [_usage()]),
+            ],
+        ) as gen, _escalation_enabled():
+            outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
+        self.assertEqual(gen.call_count, 3)  # no escalated-eval call was made
+        self.assertEqual(outcome.routing_action, "escalation_failed")
+        self.assertIn("heuristic_fallback", outcome.routing_detail)
+        self.assertEqual(outcome.body, default.body)
+        self.assertEqual(outcome.eval_result.score, 50)
+        self.assertEqual(len(outcome.cost_breakdown), 3)
+
+    def test_invalid_key_terminal_behavior_is_unchanged(self):
+        """Finding 2 must not disturb the pre-existing INVALID_GEMINI_KEY
+        terminal path, which is checked first and handled separately."""
+        target = _target_dict(fit_score=95)
+        default = _grounded_draft(target)
+        with mock.patch(
+            "app.llm.generate_structured_with_usage",
+            side_effect=[
+                llm.MeasuredResult(default, [_usage()]),
+                llm.MeasuredResult(_eval_result(50), [_usage()]),
+                llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "bad", usage=[_usage()]),
+            ],
+        ) as gen, _escalation_enabled():
+            outcome = routing.route_and_draft(self._brief(), target, {"gemini": "fake"}, paid_tier_enabled=True)
+        self.assertEqual(gen.call_count, 3)
+        self.assertEqual(outcome.routing_action, "invalid_key_terminal")
+        self.assertEqual(outcome.routing_detail, "escalated_draft")
+
+
+# =============================================================================
+# Implementation review finding 3 — verified pricing required for escalation
+# =============================================================================
+
+
+class EscalationRequiresPricingTests(unittest.TestCase):
+    def test_escalation_ready_requires_both_model_and_pricing(self):
+        with mock.patch.object(routing, "ESCALATION_MODEL", None):
+            self.assertFalse(routing._escalation_ready())
+        with mock.patch.object(routing, "ESCALATION_MODEL", ""):
+            self.assertFalse(routing._escalation_ready())
+        with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"):
+            self.assertFalse(routing._escalation_ready())  # no pricing entry at all
+        with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"), mock.patch.dict(
+            routing.PRICING_USD_PER_MILLION_TOKENS,
+            {"model-x": {"input": Decimal("1"), "output": Decimal("1")}},
+        ):
+            self.assertTrue(routing._escalation_ready())
+
+    def test_escalation_model_without_pricing_entry_never_escalates(self):
+        """Setting only ESCALATION_MODEL, with no matching pricing entry,
+        must not let a paid escalation call through."""
+        target = _target_dict(fit_score=95)
+        brief = Brief(
+            product="p", audience="a", tone="t", target_type="business",
+            niche_or_industry="n", target_countries=["United States"],
+        )
+        with mock.patch(
+            "app.llm.generate_structured_with_usage",
+            side_effect=[
+                llm.MeasuredResult(_grounded_draft(target), [_usage()]),
+                llm.MeasuredResult(_eval_result(50), [_usage()]),
+            ],
+        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "unpriced-model-fake"):
+            self.assertNotIn("unpriced-model-fake", routing.PRICING_USD_PER_MILLION_TOKENS)
+            outcome = routing.route_and_draft(brief, target, {"gemini": "fake"}, paid_tier_enabled=True)
+        self.assertEqual(gen.call_count, 2)  # default draft + default eval only
+        self.assertEqual(outcome.routing_action, "escalation_unavailable")
+
+
+# =============================================================================
+# Implementation review finding 4 — Approvals cost-summary visibility
+# =============================================================================
+
+
+class ApprovalsCostSummaryTests(_DBFixture, unittest.TestCase):
+    def _insert_draft(self, ws, target_id, status, cost_tokens, estimated_cost_microusd):
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                """
+                INSERT INTO draft (workspace_id, target_id, body, status, model_used,
+                                    cost_tokens, cost_breakdown_json, estimated_cost_microusd)
+                VALUES (?, ?, ?, ?, 'heuristic', ?, '[]', ?)
+                """,
+                (ws, target_id, "x" * 25, status, cost_tokens, estimated_cost_microusd),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _approvals_html(self, ws) -> str:
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        with TestClient(app) as client:
+            client.cookies.set("workspace_id", str(ws))
+            resp = client.get("/approvals")
+        return resp.text
+
+    def test_historical_drafts_with_empty_pending_queue_still_show_summary(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        self._insert_draft(ws, target_id, "approved", 1000, 5_000_000)
+        html = self._approvals_html(ws)
+        self.assertIn("cost-summary", html)
+        self.assertIn("$5.0000", html)
+        self.assertIn("No drafts waiting for review", html)  # the queue itself is still empty
+
+    def test_all_costs_unknown_shows_unknown_wording_and_excluded_count(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        self._insert_draft(ws, target_id, "rejected", None, None)
+        html = self._approvals_html(ws)
+        self.assertIn("No outreach with a known cost yet.", html)
+        self.assertIn("1 excluded", html)
+
+    def test_mixed_known_and_unknown_costs(self):
+        ws, camp = self._setup_campaign()
+        t1 = self._make_target(ws, camp, name="A", handle="a.com")
+        t2 = self._make_target(ws, camp, name="B", handle="b.com")
+        self._insert_draft(ws, t1, "approved", 1000, 2_000_000)
+        self._insert_draft(ws, t2, "rejected", None, None)
+        html = self._approvals_html(ws)
+        self.assertIn("$2.0000", html)
+        self.assertIn("1 excluded", html)
+
+    def test_known_heuristic_zero_cost_outreach(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        self._insert_draft(ws, target_id, "approved", 0, 0)
+        html = self._approvals_html(ws)
+        self.assertIn("$0.0000", html)
+        self.assertNotIn("excluded", html)
+
+    def test_no_drafts_at_all_shows_no_summary(self):
+        ws, _camp = self._setup_campaign()
+        html = self._approvals_html(ws)
+        self.assertNotIn("cost-summary", html)
 
 
 if __name__ == "__main__":

@@ -22,17 +22,37 @@ Read this at the start of every session for active ownership and handoff state. 
 
 ## Current handoff
 
-- **Owner-approved activity:** Slice 6 (evaluation and cost-aware routing) — **implemented**, per owner-approved plan v4. All application code, schema, routing, evaluation, persistence, UI, audit, tenant-isolation, and credential-handling work in the plan is complete and committed.
+- **Owner-approved activity:** Slice 6 (evaluation and cost-aware routing) — **implemented and review-corrected**, per owner-approved plan v4 plus a five-finding owner-directed implementation review. All application code, schema, routing, evaluation, persistence, UI, audit, tenant-isolation, and credential-handling work is complete and committed.
 - **Role:** Claude Code / SDE 1, implementer. Executed on Sonnet per the owner's model confirmation.
-- **Branch/baseline:** `codex/sde-1-slice-2-hardening`. Implementation baseline was `f052a10` (Slice 6 plan v4, 212 retained tests); the working tree is now at 263 retained tests, clean after this commit.
-- **Product state:** Slices 0–5 are complete. Slice 6 is implemented and tested but **not complete against `SPEC.md` §6** — see the owner-gate below.
-- **What shipped:** `app/agent/eval.py` (new), `app/agent/routing.py` (new), `app/llm.py` (workspace-key-only, header-only `x-goog-api-key` auth, per-attempt `TokenUsage`, `generate_structured_with_usage`), `app/agent/drafting.py` (`BANNED_FILLER_PHRASES`, `usage`/`model` additions), `app/models.py` (`EvalDimension`/`EvalRubric`/`EvalResult`), `app/db.py` (`eval` table, `workspace.paid_tier_enabled`, `draft.cost_breakdown_json`/`estimated_cost_microusd`, atomic `create_draft_with_routing`), `app/audit_banners.py` (eval/routing action maps), `app/main.py` + four templates (routing wiring, eval/cost UI, paid-tier Settings checkbox), and `tests/test_slice6_eval_routing.py` (51 new tests covering all 32 plan §6 acceptance criteria plus heuristic-rubric boundaries). `tests/test_slice4_drafting.py` was mechanically updated (9 tests) to mock `llm.generate_structured_with_usage` instead of the now-internal `llm.generate_structured`, since `drafting.draft_outreach` had to switch call targets to capture usage — no assertion or scenario changed, only the mock target, a necessary consequence of the plan's own §5.4.
+- **Branch/baseline:** `codex/sde-1-slice-2-hardening`. Implementation baseline was `f052a10` (Slice 6 plan v4, 212 retained tests); the initial implementation commit (`d7f2cc8`) brought the suite to 263; this review-correction pass brings it to 281, clean after this commit.
+- **Product state:** Slices 0–5 are complete. Slice 6 is implemented, tested, and review-corrected but **not complete against `SPEC.md` §6** — see the owner-gate below.
+- **What shipped (initial implementation, `d7f2cc8`):** `app/agent/eval.py` (new), `app/agent/routing.py` (new), `app/llm.py` (workspace-key-only, header-only `x-goog-api-key` auth, per-attempt `TokenUsage`, `generate_structured_with_usage`), `app/agent/drafting.py` (`BANNED_FILLER_PHRASES`, `usage`/`model` additions), `app/models.py` (`EvalDimension`/`EvalRubric`/`EvalResult`), `app/db.py` (`eval` table, `workspace.paid_tier_enabled`, `draft.cost_breakdown_json`/`estimated_cost_microusd`, atomic `create_draft_with_routing`), `app/audit_banners.py` (eval/routing action maps), `app/main.py` + four templates (routing wiring, eval/cost UI, paid-tier Settings checkbox), and `tests/test_slice6_eval_routing.py` (51 tests). `tests/test_slice4_drafting.py` was mechanically updated (9 tests) to mock `llm.generate_structured_with_usage` instead of the now-internal `llm.generate_structured` — no assertion or scenario changed.
+- **What shipped (review-correction pass):** a durable `draft_generation` reservation table plus `db.try_acquire_draft_generation`/`release_draft_generation`, acquired in `main.py`'s `create_draft` before any Gemini call and released in a `finally` block (300s TTL backstop) — closes a real concurrent-spend gap; `routing.route_and_draft` now only promotes an escalated result on `DraftStatus.LLM_OK`, otherwise keeping the default draft/eval and recording the new `routing.escalation_failed` audit action; `routing._escalation_ready()` now requires both `ESCALATION_MODEL` and a verified `Decimal` pricing entry for it; `app/templates/approvals.html`'s cost summary now keys off `cost_summary.draft_count` instead of the pending-drafts queue, and always shows the unknown-cost count when one exists; `SPEC.md`'s stale "falls back to the free Gemini tier" line corrected. 18 new tests in `tests/test_slice6_eval_routing.py`.
 - **Preserved contracts:** strict workspace-only keys, header-only Gemini authentication, no-request-only zero accounting, per-attempt usage and retry preservation, independently nullable token/cost aggregates, explicit workspace-scoped paid opt-in, inclusive 85/80 thresholds, fully specified eval rubric and heuristic fallback, atomic draft/eval/cost/audit persistence, tenant isolation, and no paid live verification without owner authorization (none was performed or requested this session).
 - **Known limitation/gate:** The stronger-model id and its pricing remain owner-gated and unset (`ESCALATION_MODEL = None`). Slice 6's routing plumbing is fully implemented and mocked-tested but dormant until the owner approves a specific model id and it passes the same kind of safe verification gate Slice 5 used. See `PROGRESS.md`'s "Owner-gated" section.
-- **Next action:** Owner review of the implementation. If/when the owner wants the escalation tier active, approve a specific stronger Gemini model id so it can be safely, boundedly verified per the completed plan's §6.
+- **Next action:** Owner review of the corrected implementation. If/when the owner wants the escalation tier active, approve a specific stronger Gemini model id (and its verified pricing) so it can be safely, boundedly verified per the completed plan's §6.
 
 ## Recent activity
 
+- **Slice 6 implementation review corrected: five findings.** Claude Code /
+  SDE 1 corrected five owner-identified review findings on top of the
+  initial Slice 6 implementation: (1) a durable, workspace-scoped
+  `draft_generation` reservation now prevents two concurrent draft
+  requests for the same target from both incurring provider spend — the
+  reservation is acquired before any Gemini call, released in a `finally`
+  block, and backstopped by a 300s TTL; (2) `routing.route_and_draft` no
+  longer mislabels a failed/ungrounded escalated draft as `"escalated"` —
+  it keeps the valid default draft/eval and records the new
+  `routing.escalation_failed` audit action instead, and skips a wasted
+  escalated-eval call; (3) escalation now requires a verified pricing
+  entry for `ESCALATION_MODEL`, not just the model id, via
+  `routing._escalation_ready()`; (4) the Approvals cost summary no longer
+  disappears when the pending queue is empty, and the unknown-cost
+  "excluded" count no longer disappears when there are zero known-cost
+  drafts; (5) `SPEC.md`'s stale "falls back to the free Gemini tier"
+  description of `app/llm.py` is corrected. 18 new tests; 281/281 total
+  pass. `ESCALATION_MODEL` remains `None`; no live/paid provider call was
+  made. See the current handoff above for the full file list.
 - **Slice 6 implemented: evaluation and cost-aware routing.** Claude Code /
   SDE 1 implemented `docs/plans/completed/SLICE_6_PLAN.md` v4 end to end on
   Sonnet: `app/agent/eval.py` and `app/agent/routing.py` (new), workspace-

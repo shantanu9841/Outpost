@@ -195,20 +195,22 @@ def eval_detail(status: EvalStatus, reason: str | None, score: int) -> str:
 ROUTING_EARLY_EXIT = "routing.early_exit"
 ROUTING_ESCALATED = "routing.escalated"
 ROUTING_ESCALATION_UNAVAILABLE = "routing.escalation_unavailable"
+ROUTING_ESCALATION_FAILED = "routing.escalation_failed"
 ROUTING_INVALID_KEY_TERMINAL = "routing.invalid_key_terminal"
 
 # routing_action ("default" | "early_exit" | "escalated" |
-# "escalation_unavailable" | "invalid_key_terminal", from
-# app.agent.routing.RoutingOutcome) -> the audit action to write, or None.
-# "default" intentionally maps to None: the ordinary no-escalation path
-# (no key, no opt-in, or fit below threshold) writes no extra routing audit
-# row at all (SLICE_6_PLAN.md §5.3 step 4) — draft.created/eval.scored
-# already record that this outreach happened.
+# "escalation_unavailable" | "escalation_failed" | "invalid_key_terminal",
+# from app.agent.routing.RoutingOutcome) -> the audit action to write, or
+# None. "default" intentionally maps to None: the ordinary no-escalation
+# path (no key, no opt-in, or fit below threshold) writes no extra routing
+# audit row at all (SLICE_6_PLAN.md §5.3 step 4) — draft.created/
+# eval.scored already record that this outreach happened.
 ROUTING_ACTION_FOR: dict[str, str | None] = {
     "default": None,
     "early_exit": ROUTING_EARLY_EXIT,
     "escalated": ROUTING_ESCALATED,
     "escalation_unavailable": ROUTING_ESCALATION_UNAVAILABLE,
+    "escalation_failed": ROUTING_ESCALATION_FAILED,
     "invalid_key_terminal": ROUTING_INVALID_KEY_TERMINAL,
 }
 
@@ -285,6 +287,7 @@ ACTION_LABELS: dict[str, str] = {
     ROUTING_EARLY_EXIT: "Routed (default model, confident)",
     ROUTING_ESCALATED: "Routed (escalated model)",
     ROUTING_ESCALATION_UNAVAILABLE: "Escalation unavailable (no approved stronger model)",
+    ROUTING_ESCALATION_FAILED: "Escalation attempted but did not produce a usable draft",
     ROUTING_INVALID_KEY_TERMINAL: "Routing stopped (Gemini key rejected)",
 }
 

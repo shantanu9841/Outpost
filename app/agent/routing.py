@@ -7,9 +7,11 @@ one call site that actually has a workspace_id, not spread into a module
 with no database dependency otherwise (SLICE_6_PLAN.md §0.2 correction 4).
 
 Escalation is fully implemented and mocked-tested but cannot fire until the
-owner sets a verified ESCALATION_MODEL (decision 5/6 of the plan) *and* a
-workspace opts in — the code gate is `ESCALATION_MODEL is None`, checked in
-step 4 below.
+owner sets a verified ESCALATION_MODEL *and* adds its verified pricing to
+PRICING_USD_PER_MILLION_TOKENS (decision 5/6 of the plan) *and* a workspace
+opts in — the code gate is `_escalation_ready()`, checked in step 4 below.
+Setting ESCALATION_MODEL alone, with no matching pricing entry, must not
+let a paid call through.
 
 Invalid credentials are terminal after every model-backed stage (default
 draft, default eval, escalated draft, escalated eval): the first
@@ -59,7 +61,8 @@ class RoutingOutcome:
     cost_tokens: int | None            # None means unknown, 0 means no request issued
     estimated_cost_microusd: int | None
     routing_action: str  # "default" | "early_exit" | "escalated"
-                          # | "escalation_unavailable" | "invalid_key_terminal"
+                          # | "escalation_unavailable" | "escalation_failed"
+                          # | "invalid_key_terminal"
     # Elaborations beyond the plan's minimal field list, needed by
     # db.create_draft_with_routing (SLICE_6_PLAN.md §5.6) to write the same
     # kind of informative draft.created/routing audit detail Slices 2-5
@@ -120,7 +123,7 @@ def route_and_draft(
     )
     if not eligible:
         return _finish(default_draft, default_eval, cost_breakdown, "default", None)
-    if ESCALATION_MODEL is None:
+    if not _escalation_ready():
         return _finish(default_draft, default_eval, cost_breakdown, "escalation_unavailable", None)
 
     # 5. Confidence early-exit / escalation with terminal checks.
@@ -135,6 +138,19 @@ def route_and_draft(
         return _finish(
             default_draft, default_eval, cost_breakdown, "invalid_key_terminal", "escalated_draft"
         )
+
+    if escalated_draft.status != DraftStatus.LLM_OK:
+        # The escalation call didn't produce a valid, grounded model draft —
+        # a provider error, or a schema-valid-but-ungrounded response that
+        # already fell back to the heuristic one level down. Keep the
+        # already-valid default draft/eval rather than silently presenting
+        # a heuristic body as "escalated," and never spend an eval call
+        # judging a body we're not going to use.
+        detail = (
+            escalated_draft.status.value if escalated_draft.reason is None
+            else f"{escalated_draft.status.value}: {escalated_draft.reason}"
+        )
+        return _finish(default_draft, default_eval, cost_breakdown, "escalation_failed", detail)
 
     escalated_eval = eval_mod.evaluate_draft(brief, target, escalated_draft.body, settings)
     cost_breakdown.extend(escalated_eval.usage)
@@ -168,6 +184,26 @@ def _finish(
         draft_status=draft_result.status,
         draft_reason=draft_result.reason,
         eval_reason=eval_outcome.reason,
+    )
+
+
+def _escalation_ready() -> bool:
+    """True iff escalation can actually be attempted: ESCALATION_MODEL is a
+    non-empty approved model id AND PRICING_USD_PER_MILLION_TOKENS has a
+    valid Decimal input/output rate entry for that exact model.
+
+    A model id alone is not enough to let a paid call through — setting
+    ESCALATION_MODEL without also adding its verified pricing must still
+    produce the same truthful "escalation_unavailable" outcome, never a
+    live call priced by guesswork (or not priced at all).
+    """
+    if not ESCALATION_MODEL:
+        return False
+    rates = PRICING_USD_PER_MILLION_TOKENS.get(ESCALATION_MODEL)
+    return (
+        isinstance(rates, dict)
+        and isinstance(rates.get("input"), Decimal)
+        and isinstance(rates.get("output"), Decimal)
     )
 
 

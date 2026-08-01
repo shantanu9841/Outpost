@@ -15,7 +15,7 @@ The engine (intake, discovery, fit-scoring, drafting, approval, pipeline, memory
 - `app/models.py`: Pydantic schemas for all structured data and all model outputs.
 - `app/sources/`: one module per source behind a shared Source interface. Files: `base.py`, `youtube.py`, `apify.py`, `apollo.py`.
 - `app/agent/`: `intake.py` (brief parsing), `scoring.py` (fit plus citations), `drafting.py` (outreach), `eval.py` (quality rubric), `routing.py` (model selection plus cost).
-- `app/llm.py`: single wrapper for all model calls. Takes a schema, validates, retries, records token cost. Reads the workspace LLM key or falls back to the free Gemini tier.
+- `app/llm.py`: single wrapper for all model calls. Takes a schema, validates, retries, records token cost. Model calls use only the workspace's own saved Gemini key; with no key, the caller falls back to a deterministic local heuristic/demo path instead of calling a model.
 - `app/templates/`: HTML templates styled per design.md.
 - `app/static/`: CSS (design tokens) and minimal JS.
 - `outpost.db`: the database file.

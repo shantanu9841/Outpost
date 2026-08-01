@@ -507,35 +507,52 @@ def create_draft(
 
     # Memory / UX check: don't offer a second draft while one is active.
     # The partial unique index (one_active_draft_per_target) is the
-    # authoritative guard behind this — add_draft below still enforces it
-    # even if two requests race past this check at the same time.
+    # authoritative guard behind this — create_draft_with_routing below
+    # still enforces it even if two requests race past this check.
     if db.get_active_draft_for_target(workspace_id, target_id) is not None:
         return RedirectResponse("/approvals", status_code=303)
 
-    campaign = db.get_campaign(workspace_id, target["campaign_id"])
-    if campaign is None:
-        return RedirectResponse("/campaigns", status_code=303)
-    brief = Brief.model_validate_json(campaign["brief_json"])
-
-    settings = db.get_settings(workspace_id)
-    # The workspace-scoped paid-tier lookup happens here, once, at the one
-    # call site that already has workspace_id in scope — routing.py itself
-    # performs no database access at all (SLICE_6_PLAN.md §0.2 correction 4).
-    paid_tier_enabled = db.get_paid_tier_enabled(workspace_id)
-    outcome = routing.route_and_draft(
-        brief, dict(target), settings, paid_tier_enabled=paid_tier_enabled
-    )
+    # Reserve this target for generation BEFORE any Gemini call is issued —
+    # the authoritative guard against two concurrent requests both paying
+    # for provider usage while only one can ever win the draft insert (the
+    # one_active_draft_per_target check above/below only catches that
+    # AFTER both have already generated). See db.try_acquire_draft_generation.
+    reservation_id = db.try_acquire_draft_generation(workspace_id, target_id)
+    if reservation_id is None:
+        return RedirectResponse(f"/campaigns/{target['campaign_id']}", status_code=303)
 
     try:
-        db.create_draft_with_routing(workspace_id, target_id, outcome)
-    except db.ActiveDraftExists:
-        # Lost the race against a concurrent draft request; the winner's
-        # draft is already in the queue.
-        return RedirectResponse("/approvals", status_code=303)
-    except db.NotFound:
-        return RedirectResponse("/campaigns", status_code=303)
+        campaign = db.get_campaign(workspace_id, target["campaign_id"])
+        if campaign is None:
+            return RedirectResponse("/campaigns", status_code=303)
+        brief = Brief.model_validate_json(campaign["brief_json"])
 
-    return RedirectResponse("/approvals", status_code=303)
+        settings = db.get_settings(workspace_id)
+        # The workspace-scoped paid-tier lookup happens here, once, at the
+        # one call site that already has workspace_id in scope — routing.py
+        # itself performs no database access at all (SLICE_6_PLAN.md
+        # §0.2 correction 4).
+        paid_tier_enabled = db.get_paid_tier_enabled(workspace_id)
+        outcome = routing.route_and_draft(
+            brief, dict(target), settings, paid_tier_enabled=paid_tier_enabled
+        )
+
+        try:
+            db.create_draft_with_routing(workspace_id, target_id, outcome)
+        except db.ActiveDraftExists:
+            # Lost the race against a concurrent draft request; the winner's
+            # draft is already in the queue.
+            return RedirectResponse("/approvals", status_code=303)
+        except db.NotFound:
+            return RedirectResponse("/campaigns", status_code=303)
+
+        return RedirectResponse("/approvals", status_code=303)
+    finally:
+        # Always release, success or failure, so a crashed/erroring
+        # generation never permanently blocks this target — the
+        # expires_at TTL is the defense-in-depth backstop if this finally
+        # itself never runs (e.g. the process is killed).
+        db.release_draft_generation(workspace_id, target_id, reservation_id)
 
 
 @app.get("/approvals")

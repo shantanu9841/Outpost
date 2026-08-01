@@ -69,6 +69,23 @@ class ActiveDraftExists(Exception):
     """The one_active_draft_per_target race -> route redirects to /approvals."""
 
 
+class GenerationInProgress(Exception):
+    """Another draft generation (routing.route_and_draft, which issues the
+    real Gemini calls) is already active for this workspace/target ->
+    route redirects rather than issuing a second, wasted set of provider
+    calls. See try_acquire_draft_generation's docstring."""
+
+
+# How long a reservation is honored before it is treated as abandoned and
+# reclaimable (e.g. the process that held it crashed before releasing it).
+# Comfortably above the worst realistic case: up to four model-backed
+# stages (default draft, default eval, escalated draft, escalated eval),
+# each with a validation retry, each bounded by llm.REQUEST_TIMEOUT_SECS
+# (30s) -> 8 * 30s = 240s. 300s leaves headroom without blocking a target
+# for long after a genuine crash.
+DRAFT_GENERATION_TTL_SECONDS = 300
+
+
 def get_connection() -> sqlite3.Connection:
     """Open a connection to the Outpost database.
 
@@ -204,6 +221,29 @@ def init() -> None:
                 rubric_json   TEXT    NOT NULL,
                 score         INTEGER NOT NULL,
                 created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+
+        # A durable, workspace-scoped reservation that a draft generation
+        # (routing.route_and_draft's Gemini calls) is in progress for one
+        # target, so a second concurrent request can be turned away BEFORE
+        # it issues any provider call, not just after — the pre-existing
+        # one_active_draft_per_target unique index only ever catches the
+        # loser after both requests have already paid for their own
+        # generation. UNIQUE(workspace_id, target_id) is the authoritative
+        # single-winner guard; expires_at bounds how long a crashed
+        # holder's row can block the target (see release_draft_generation
+        # and try_acquire_draft_generation).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS draft_generation (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id  INTEGER NOT NULL REFERENCES workspace(id),
+                target_id     INTEGER NOT NULL REFERENCES target(id),
+                started_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                expires_at    TEXT    NOT NULL,
+                UNIQUE(workspace_id, target_id)
             )
             """
         )
@@ -639,6 +679,79 @@ def _usage_to_dict(usage) -> dict:
     Every field is a model name, plain int/None, or bool — never a provider
     payload, header, or credential (app.llm's usage-accounting guarantee)."""
     return asdict(usage)
+
+
+def try_acquire_draft_generation(workspace_id: int, target_id: int) -> int | None:
+    """Reserve the right to run one draft generation (routing.route_and_draft's
+    Gemini calls) for this workspace/target, or return None if another
+    reservation is already active and unexpired.
+
+    Callers must call this BEFORE issuing any provider call, and must
+    release the reservation (release_draft_generation) once generation
+    finishes, in a `finally` block, so a failed generation never leaves the
+    target permanently blocked.
+
+    This is the authoritative concurrency guard, not merely advisory: the
+    UNIQUE(workspace_id, target_id) index on draft_generation makes a
+    second concurrent INSERT for the same target fail with IntegrityError
+    while this one's transaction is open, and SQLite serializes writers —
+    two callers racing to acquire the same target can never both succeed.
+    It is durable (a real table, not an in-process lock) so it works
+    identically across threads and separate OS processes sharing the same
+    outpost.db file, and workspace-scoped by construction (workspace_id is
+    part of the unique key and every query).
+
+    The transaction held here is intentionally tiny — one DELETE (clearing
+    a stale reservation) and one INSERT, committed immediately — never held
+    open across a network call. All the actual Gemini calls happen after
+    this function has already returned and closed its connection.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Reclaim a reservation whose holder never released it (a crash
+        # mid-generation) rather than blocking this target forever.
+        conn.execute(
+            """
+            DELETE FROM draft_generation
+            WHERE workspace_id = ? AND target_id = ? AND expires_at < datetime('now')
+            """,
+            (workspace_id, target_id),
+        )
+        try:
+            cursor = conn.execute(
+                """
+                INSERT INTO draft_generation (workspace_id, target_id, expires_at)
+                VALUES (?, ?, datetime('now', ?))
+                """,
+                (workspace_id, target_id, f"+{DRAFT_GENERATION_TTL_SECONDS} seconds"),
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            return None
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def release_draft_generation(workspace_id: int, target_id: int, reservation_id: int) -> None:
+    """Release a reservation acquired by try_acquire_draft_generation.
+
+    Scoped by workspace_id/target_id/id together so a caller can never
+    accidentally release a different workspace's or a superseded
+    reservation. Idempotent: releasing an already-released or expired-and-
+    reclaimed reservation deletes zero rows and is not an error.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "DELETE FROM draft_generation WHERE workspace_id = ? AND target_id = ? AND id = ?",
+            (workspace_id, target_id, reservation_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def create_draft_with_routing(

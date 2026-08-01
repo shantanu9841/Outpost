@@ -9,19 +9,21 @@
     <h1 class="page__title">Approvals</h1>
   </div>
 
-  {% if drafts %}
+  {% if cost_summary.draft_count > 0 %}
   <div class="cost-summary">
     {% if cost_summary.known_cost_count > 0 %}
     <span class="cost-summary__figure mono">~${{ "%.4f"|format(cost_summary.average_cost_microusd / 1000000) }}</span>
     <span class="cost-summary__label">average estimated paid list-price cost per outreach</span>
-    {% if cost_summary.unknown_cost_count > 0 %}
-    <span class="badge badge--muted">{{ cost_summary.unknown_cost_count }} excluded (cost unknown)</span>
-    {% endif %}
     {% else %}
     <span class="cost-summary__label">No outreach with a known cost yet.</span>
     {% endif %}
+    {% if cost_summary.unknown_cost_count > 0 %}
+    <span class="badge badge--muted">{{ cost_summary.unknown_cost_count }} excluded (cost unknown)</span>
+    {% endif %}
   </div>
+  {% endif %}
 
+  {% if drafts %}
   <div class="approvals">
     {% for d in drafts %}
     <article class="draft-card" id="draft-{{ d.id }}">

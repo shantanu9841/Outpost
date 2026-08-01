@@ -2313,3 +2313,157 @@ or coding sessions. It complements, but does not replace:
   model id so it can be safely, boundedly verified per the completed
   plan's §6 "Safe live verification," then Slice 6 can be marked complete
   against `SPEC.md`.
+
+## 2026-08-01 — Slice 6 implementation review corrected: five findings
+
+- Contributor/environment: Claude Code / SDE 1, running in a Claude Code
+  worktree session whose assigned working directory again did not match
+  this task's target branch/workspace (the same mismatch as the prior
+  Slice 6 implementation session). Per the same worktree-mismatch check,
+  all edits were made directly against the correct main working tree
+  (`codex/sde-1-slice-2-hardening`, starting commit `d7f2cc8`) using
+  absolute paths and explicit `cd`-prefixed shell commands.
+- Slice: Slice 6 (evaluation and cost-aware routing) — implementation
+  review corrections, owner-directed, against the completed
+  `docs/plans/completed/SLICE_6_PLAN.md` v4.
+- Role: Implementer.
+- Implementation status: Complete for all five findings. Slice 6 remains
+  **not** complete against `SPEC.md` §6 — `ESCALATION_MODEL` stays owner-
+  gated and unset; unchanged by this pass.
+- Changes and corrections, one per finding:
+  1. **Concurrent-generation spend.** Two simultaneous "Draft outreach"
+     requests for the same target could both reach
+     `routing.route_and_draft` (both incurring real Gemini usage) before
+     the pre-existing `one_active_draft_per_target` unique index caught
+     the loser only at persistence time, after both had already paid for
+     generation. Added `app/db.py`'s `draft_generation` table
+     (`UNIQUE(workspace_id, target_id)`, `expires_at` TTL),
+     `try_acquire_draft_generation`/`release_draft_generation`, and
+     `GenerationInProgress`. `app/main.py`'s `create_draft` now acquires a
+     reservation immediately after the existing active-draft UX check and
+     before any Gemini call, wraps the entire campaign/brief/settings/
+     routing/persistence sequence in a `try`, and releases the reservation
+     in a `finally` regardless of outcome — a crashed process (finally
+     never runs) is bounded by the 300-second TTL, not left blocking the
+     target forever. The acquire/release transactions are each a single
+     fast DELETE-then-INSERT or DELETE, committed immediately; no
+     transaction is held open across a network call. A second concurrent
+     request that loses the race is redirected to the campaign page rather
+     than attempting generation at all.
+  2. **Escalation mislabeling on a failed/ungrounded escalated draft.**
+     `routing.route_and_draft` previously proceeded to evaluate and label
+     `"escalated"` any escalated draft that wasn't specifically
+     `INVALID_GEMINI_KEY` — including a plain provider error
+     (`GEMINI_ERROR`) or a schema-valid-but-ungrounded response that had
+     already fallen back to the heuristic (`HEURISTIC_FALLBACK`) one level
+     down, silently presenting a heuristic body as an upgrade and wasting
+     an eval call judging it. Added a
+     `if escalated_draft.status != DraftStatus.LLM_OK` branch (after the
+     existing `INVALID_GEMINI_KEY` check, which is unchanged) that keeps
+     the already-valid default draft/eval, preserves the failed attempt's
+     usage in `cost_breakdown`, and returns a new `routing_action =
+     "escalation_failed"` with `routing_detail` carrying the real status
+     and sanitized reason (e.g. `"gemini_error: provider boom"`). No
+     escalated-body eval call is made in this branch.
+  3. **Pricing-gated escalation.** Escalation eligibility previously
+     checked only `ESCALATION_MODEL is None`, meaning setting the model id
+     alone — with no corresponding entry in
+     `PRICING_USD_PER_MILLION_TOKENS` — would have let a live call through
+     with no way to price it. Added `routing._escalation_ready()`,
+     requiring both a non-empty `ESCALATION_MODEL` and a `PRICING_USD_
+     PER_MILLION_TOKENS[ESCALATION_MODEL]` entry whose `input`/`output`
+     are both `Decimal` instances; step 4's eligibility check now calls
+     this instead of the bare `is None` check.
+  4. **Approvals cost-summary visibility.** `app/templates/approvals.html`
+     previously nested the entire cost-summary block inside
+     `{% if drafts %}` (the pending/edited queue), even though
+     `cost_summary` is computed from every draft ever created in the
+     workspace (`db.outreach_cost_summary`) — a workspace with only
+     historical approved/rejected drafts and an empty pending queue showed
+     no summary at all. It also nested the unknown-cost "excluded" badge
+     inside `{% if cost_summary.known_cost_count > 0 %}`, so an
+     all-unknown-cost workspace (zero known-cost drafts) never showed the
+     excluded count either. Restructured to gate the whole block on
+     `cost_summary.draft_count > 0` (independent of the pending queue) and
+     moved the excluded-count badge outside the known-cost conditional so
+     it always renders whenever `unknown_cost_count > 0`. No wording
+     changed: "estimated paid list-price cost" and the heuristic
+     zero-cost phrasing are unchanged.
+  5. **SPEC.md accuracy.** Replaced "Reads the workspace LLM key or falls
+     back to the free Gemini tier" (stale since Slice 6 removed the
+     `GEMINI_API_KEY` environment fallback and there was never a "free
+     Gemini tier" as such) with an accurate description: model calls use
+     only the workspace's own saved Gemini key, and no key means the
+     deterministic local heuristic/demo path, not a model call.
+- Files or areas affected: `app/db.py` (`draft_generation` table,
+  `try_acquire_draft_generation`, `release_draft_generation`,
+  `GenerationInProgress`, `DRAFT_GENERATION_TTL_SECONDS`), `app/main.py`
+  (`create_draft`'s reservation acquire/release), `app/agent/routing.py`
+  (`_escalation_ready`, the `escalation_failed` branch, updated module/
+  field docstrings), `app/audit_banners.py` (`ROUTING_ESCALATION_FAILED`,
+  `ROUTING_ACTION_FOR["escalation_failed"]`, its `ACTION_LABELS` entry),
+  `app/templates/approvals.html` (cost-summary restructure),
+  `tests/test_slice6_eval_routing.py` (18 new tests: `_escalation_enabled`
+  helper plus `DraftGenerationReservationTests`,
+  `EscalationFailurePreservesDefaultTests`,
+  `EscalationRequiresPricingTests`, `ApprovalsCostSummaryTests`; seven
+  pre-existing tests' `ESCALATION_MODEL`-only patches were also updated to
+  the new `_escalation_enabled()` helper so they keep exercising the
+  escalation path now that pricing is required too — no assertion or
+  scenario changed), `SPEC.md`, `PROGRESS.md`, `DECISIONS.md`,
+  `collaboration.md`, and this file.
+- Verification: `python -m unittest discover -s tests` passes 281/281
+  (263 baseline plus 18 new), all mocked at the `httpx.post`/`app.llm.
+  generate_structured_with_usage` boundary — no real provider call, no
+  real key, no live Gemini/paid-provider call of any kind. The new
+  concurrency test (`test_concurrent_requests_only_one_generates`) uses
+  two real threads racing against a shared temp-file SQLite database (not
+  `:memory:`) with a mocked, artificially slowed `routing.route_and_draft`
+  and confirms the mock is invoked exactly once and the loser produces no
+  pending draft; a companion test confirms a failed generation (a raised
+  exception from the mocked routing call) still releases the reservation
+  so the target is not permanently blocked; a third confirms the acquire
+  transaction itself does not hold a database-wide write lock (an
+  unrelated `create_workspace` call succeeds immediately after an acquire
+  returns). `git diff --check` passed (only pre-existing LF/CRLF autocrlf
+  warnings). `git status` confirmed only `SPEC.md`, `app/agent/routing.py`,
+  `app/audit_banners.py`, `app/db.py`, `app/main.py`,
+  `app/templates/approvals.html`, and `tests/test_slice6_eval_routing.py`
+  changed (plus the four documentation files and this log, added in the
+  same commit) — no unrelated file, seed, or `requirements.txt` change. A
+  credential-pattern scan (API-key/token/private-key/`x-goog-api-key`-
+  value regexes) over the complete diff found no matches. `ESCALATION_MODEL`
+  was confirmed still `None` by direct import after all changes. Live-
+  verified against the real `outpost.db` in the correct working tree (not
+  a script; normal product usage through the running app, same precedent
+  as prior sessions): started `uvicorn` on port 8011, created a new
+  workspace ("Slice 6 Findings Verify"), ran a business campaign with zero
+  keys configured, drafted and approved one target and drafted and
+  rejected a second (producing a workspace with historical approved/
+  rejected drafts and an empty pending queue), and confirmed via `curl`
+  that the corrected `/approvals` page shows both the cost-summary
+  ("~$0.0000") and the "No drafts waiting for review" empty state
+  simultaneously — the exact scenario finding 4 was about. No errors in
+  the server log across this flow. The `.cost-summary`/`.badge--muted` CSS
+  classes touched by this fix are unchanged from the initial Slice 6
+  implementation (already verified against light/dark theme tokens in
+  that session); no new CSS was introduced by this pass, so no new visual
+  regression is possible from this change. This new workspace was left in
+  place as normal product usage, matching prior-session precedent (never
+  reset/deleted).
+- Last known working state: `codex/sde-1-slice-2-hardening`, working tree
+  clean except for the changes described above, ready to commit. All 281
+  tests pass.
+- Known limitations: Unchanged from the initial implementation —
+  `ESCALATION_MODEL` remains owner-gated and unset; the escalation tier is
+  fully implemented and mocked-tested but dormant. The
+  `thoughtsTokenCount`-derivation rule and the eval judge always running
+  on the default model are both unaffected by this pass. The
+  `draft_generation` reservation's 300-second TTL is a judgment call
+  (comfortably above the worst-case 8-attempt/30s-timeout envelope) that
+  the owner may want to tune once real generation latencies are observed.
+- Next action: Owner review of the five corrections. If/when the owner
+  wants the escalation tier active, approve a specific stronger Gemini
+  model id and its verified pricing so it can be safely, boundedly
+  verified per the completed plan's §6, then Slice 6 can be marked
+  complete against `SPEC.md`.

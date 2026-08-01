@@ -8,7 +8,11 @@ Slices 0–5 are implemented and committed. Slice 6 (evaluation and
 cost-aware routing) is implemented, tested, and committed, but is **not**
 marked complete against `SPEC.md` §6 — the owner-gated stronger model
 (`ESCALATION_MODEL`) remains unset; see "Owner-gated: Slice 6 stronger
-model" below. The retained baseline is **263 passing tests** via:
+model" below. A subsequent implementation-review pass corrected five
+findings (concurrent-generation spend, escalation-failure handling,
+pricing-gated escalation, an Approvals cost-summary visibility bug, and a
+stale SPEC.md description) — see "Slice 6 review corrections" below. The
+retained baseline is **281 passing tests** via:
 
 ```powershell
 python -m unittest discover -s tests
@@ -18,7 +22,8 @@ python -m unittest discover -s tests
 mock `llm.generate_structured_with_usage` instead of the now-internal
 `llm.generate_structured`, since `app/agent/drafting.py` had to switch call
 targets to capture per-attempt usage; every existing assertion/scenario is
-unchanged — plus 51 new tests in `tests/test_slice6_eval_routing.py`.)
+unchanged — plus 69 tests in `tests/test_slice6_eval_routing.py` (51 from
+the initial implementation, 18 added by the review-correction pass).)
 
 ## Implemented product
 
@@ -29,7 +34,19 @@ unchanged — plus 51 new tests in `tests/test_slice6_eval_routing.py`.)
 - **Drafting and approvals:** Gemini or the deterministic zero-key heuristic produces evidence-referencing drafts, for both business and creator targets. Model drafts pass a runtime grounding gate. A human can save, approve, or reject; approving commits the textarea's current normalized text.
 - **Pipeline:** Approved targets enter queued/contacted/replied/live/declined state transitions. Illegal transitions are controlled conflicts, same-stage requests are no-ops, and stage changes require an approved draft.
 - **Audit:** Intake, discovery (business and creator, namespaced separately so no action key collides), scoring, draft, approval, rejection, and stage actions are recorded. Slice 4 mutations commit their required audit row atomically with the state change.
-- **Evaluation and cost-aware routing (Slice 6):** every drafted outreach is scored against a fully-specified four-dimension rubric (personalization, specificity, non-genericness, clear ask) — an LLM judge when a Gemini key is present, else a deterministic heuristic that produces the identical shape. `app/agent/routing.py` drafts with the default model (`gemini-3.6-flash`) or the zero-key heuristic, and escalates to a stronger paid tier only when the workspace's own key, an explicit `paid_tier_enabled` opt-in, and a high fit score (`>= 85`) all hold — escalation is fully implemented and tested but dormant (`ESCALATION_MODEL = None`) until the owner approves a specific stronger model id. An `INVALID_GEMINI_KEY` outcome at any of the four model-backed stages (default draft, default eval, escalated draft, escalated eval) is terminal for the rest of that outreach, preserving every usage entry already collected. Every issued Gemini HTTP attempt — success or failure — produces one `TokenUsage` record; `cost_tokens`/`estimated_cost_microusd` are `NULL` (unknown) whenever any issued attempt's usage or pricing is unreadable, and `0` (known) only when no Gemini request was ever issued. Pricing sums each attempt's exact `Decimal` contribution at its own model's rate and rounds once (`ROUND_HALF_UP`) to integer micro-USD; no binary floats, no per-attempt rounding. The Gemini key is sent only via the `x-goog-api-key` header (no query parameter) and there is no `GEMINI_API_KEY` environment fallback anywhere — every LLM workflow is workspace-key-only. Approvals shows model used, an expandable eval-rubric badge, per-outreach cost (or "cost unknown" / "0 tokens (heuristic, no cost)"), and a running average cost-per-outreach; Pipeline and campaign detail show the same figures more lightly.
+- **Evaluation and cost-aware routing (Slice 6):** every drafted outreach is scored against a fully-specified four-dimension rubric (personalization, specificity, non-genericness, clear ask) — an LLM judge when a Gemini key is present, else a deterministic heuristic that produces the identical shape. `app/agent/routing.py` drafts with the default model (`gemini-3.6-flash`) or the zero-key heuristic, and escalates to a stronger paid tier only when the workspace's own key, an explicit `paid_tier_enabled` opt-in, a high fit score (`>= 85`), and a verified pricing entry for `ESCALATION_MODEL` all hold — escalation is fully implemented and tested but dormant (`ESCALATION_MODEL = None`) until the owner approves a specific stronger model id and its pricing. An `INVALID_GEMINI_KEY` outcome at any of the four model-backed stages (default draft, default eval, escalated draft, escalated eval) is terminal for the rest of that outreach, preserving every usage entry already collected; an escalated draft that isn't a valid grounded model result (a provider error or a heuristic fallback) keeps the already-valid default draft/eval instead of being mislabeled "escalated." A durable, workspace-scoped `draft_generation` reservation (`db.try_acquire_draft_generation`/`release_draft_generation`) is acquired before any Gemini call and released after, so two concurrent requests for the same target can never both incur provider spend. Every issued Gemini HTTP attempt — success or failure — produces one `TokenUsage` record; `cost_tokens`/`estimated_cost_microusd` are `NULL` (unknown) whenever any issued attempt's usage or pricing is unreadable, and `0` (known) only when no Gemini request was ever issued. Pricing sums each attempt's exact `Decimal` contribution at its own model's rate and rounds once (`ROUND_HALF_UP`) to integer micro-USD; no binary floats, no per-attempt rounding. The Gemini key is sent only via the `x-goog-api-key` header (no query parameter) and there is no `GEMINI_API_KEY` environment fallback anywhere — every LLM workflow is workspace-key-only. Approvals shows model used, an expandable eval-rubric badge, per-outreach cost (or "cost unknown" / "0 tokens (heuristic, no cost)"), and a running average cost-per-outreach that reflects every draft ever created in the workspace, not only the currently pending ones; Pipeline and campaign detail show the same per-draft figures more lightly.
+
+## Slice 6 review corrections
+
+An implementation-review pass on the initial Slice 6 commit (`d7f2cc8`) found and fixed five issues, all on the same branch:
+
+1. **Concurrent-generation spend.** Two simultaneous "Draft outreach" requests for the same target could both reach `routing.route_and_draft` (both incurring real Gemini usage) before the pre-existing `one_active_draft_per_target` unique index caught the loser only at persistence time. Fixed with a durable, workspace-scoped `draft_generation` reservation table acquired in `app/main.py`'s `create_draft` before any provider call and released in a `finally` block, with a 300-second TTL as a crash backstop. The reservation transaction is a single fast INSERT, never held open across a network call.
+2. **Escalation mislabeling.** `routing.route_and_draft` no longer promotes an escalated draft to `routing_action="escalated"` unless it actually reached `DraftStatus.LLM_OK`; a provider error or ungrounded fallback during escalation now keeps the valid default draft/eval, records `routing.escalation_failed` with the real failure reason, and skips an unnecessary escalated-body eval call.
+3. **Pricing-gated escalation.** `routing._escalation_ready()` now requires both a non-empty `ESCALATION_MODEL` **and** a valid `Decimal` input/output pricing entry for that exact model — setting only the model id can no longer let a paid call through.
+4. **Approvals cost-summary visibility.** The running cost-per-outreach summary was previously hidden whenever the pending-drafts queue was empty, even if historical (approved/rejected) drafts existed with known costs — it also hid the unknown-cost "excluded" count whenever there were zero known-cost drafts. Both are fixed in `app/templates/approvals.html`: the summary now keys off `cost_summary.draft_count`, independent of the pending queue.
+5. **SPEC.md accuracy.** Corrected the stale claim that `app/llm.py` "falls back to the free Gemini tier" — it uses only the workspace's saved key, with no environment fallback.
+
+18 new retained tests cover all five (`tests/test_slice6_eval_routing.py`).
 
 ## Current data model
 
@@ -42,8 +59,9 @@ unchanged — plus 51 new tests in `tests/test_slice6_eval_routing.py`.)
 - `audit`
 - `draft` — plus idempotently migrated `cost_breakdown_json` and `estimated_cost_microusd` columns.
 - `eval` (Slice 6) — one row per draft (`draft_id UNIQUE`), `rubric_json` + `score`.
+- `draft_generation` (Slice 6 review correction) — a durable, workspace-scoped `(workspace_id, target_id)`-unique reservation held for the duration of one draft generation, with a 300-second `expires_at` TTL as a crash backstop.
 
-Every tenant-facing database function requires `workspace_id`. `draft` has a partial unique index allowing at most one non-rejected draft per target, and `eval` a unique index on `draft_id` allowing at most one eval per draft. `cost_tokens` on `draft` is now populated by `db.create_draft_with_routing`, the one atomic writer of a routed draft's body, cost columns, eval row, and every required audit row.
+Every tenant-facing database function requires `workspace_id`. `draft` has a partial unique index allowing at most one non-rejected draft per target, `eval` a unique index on `draft_id` allowing at most one eval per draft, and `draft_generation` a unique index on `(workspace_id, target_id)` allowing at most one active generation per target. `cost_tokens` on `draft` is now populated by `db.create_draft_with_routing`, the one atomic writer of a routed draft's body, cost columns, eval row, and every required audit row.
 
 ## Active implementation guarantees
 
@@ -67,6 +85,10 @@ Every tenant-facing database function requires `workspace_id`. `draft` has a par
 - An `INVALID_GEMINI_KEY` outcome at default draft, default eval, escalated draft, or escalated eval is terminal for the rest of that routing operation, while every usage entry already collected is preserved in `cost_breakdown`.
 - `db.create_draft_with_routing` commits the draft (with its cost columns), its eval row, and every required audit row (`draft.created`, `eval.scored`, plus a routing-decision row when one applies) in one transaction, or none.
 - `db.eval`'s `draft_id UNIQUE` constraint enforces "exactly one eval per draft" at the database level, not only in application code.
+- A draft generation is reserved (`db.try_acquire_draft_generation`) before any Gemini call and released after (`finally`, plus a 300-second TTL backstop); two concurrent requests for the same workspace/target can never both incur provider spend, and the loser is turned away before generating anything.
+- An escalated draft is only ever promoted (`routing_action="escalated"`) when it reaches `DraftStatus.LLM_OK`; a provider error or ungrounded fallback during escalation keeps the already-valid default draft/eval and records `routing.escalation_failed`, never a mislabeled "escalated" result, and never spends an eval call on a body that won't be used.
+- Escalation additionally requires a verified `Decimal` pricing entry for `ESCALATION_MODEL` (`routing._escalation_ready()`); setting the model id alone cannot let a paid call through.
+- The Approvals running cost summary reflects every draft ever created in the workspace (`db.outreach_cost_summary`), shown whenever `draft_count > 0` regardless of whether the pending queue is currently empty.
 
 Implementation details and rationale are indexed in `DECISIONS.md`; retained behavior is authoritative in code and tests.
 
