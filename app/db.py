@@ -701,6 +701,16 @@ def try_acquire_draft_generation(workspace_id: int, target_id: int) -> int | Non
     outpost.db file, and workspace-scoped by construction (workspace_id is
     part of the unique key and every query).
 
+    Tenancy is enforced by the INSERT itself, exactly like add_draft:
+    INSERT ... SELECT only produces a row when the subquery finds
+    `target_id` inside THIS workspace, so a target belonging to another
+    workspace — or a target_id that doesn't exist at all — reserves
+    nothing and returns None, the same as an already-active reservation.
+    This is authoritative independent of any earlier get_target() lookup
+    the caller may have already done; SQLite proving both IDs exist
+    independently is not the same as proving the target belongs to the
+    workspace, which is what actually matters here.
+
     The transaction held here is intentionally tiny — one DELETE (clearing
     a stale reservation) and one INSERT, committed immediately — never held
     open across a network call. All the actual Gemini calls happen after
@@ -722,11 +732,19 @@ def try_acquire_draft_generation(workspace_id: int, target_id: int) -> int | Non
             cursor = conn.execute(
                 """
                 INSERT INTO draft_generation (workspace_id, target_id, expires_at)
-                VALUES (?, ?, datetime('now', ?))
+                SELECT ?, target.id, datetime('now', ?)
+                FROM target
+                WHERE target.workspace_id = ? AND target.id = ?
                 """,
-                (workspace_id, target_id, f"+{DRAFT_GENERATION_TTL_SECONDS} seconds"),
+                (workspace_id, f"+{DRAFT_GENERATION_TTL_SECONDS} seconds", workspace_id, target_id),
             )
         except sqlite3.IntegrityError:
+            conn.rollback()
+            return None
+        if cursor.rowcount == 0:
+            # No target row matched (workspace_id, target_id) together —
+            # either the target doesn't exist, or it belongs to a
+            # different workspace. Either way, nothing to reserve.
             conn.rollback()
             return None
         conn.commit()

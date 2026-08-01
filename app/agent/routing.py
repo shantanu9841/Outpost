@@ -187,24 +187,34 @@ def _finish(
     )
 
 
+def _is_valid_rate(value: object) -> bool:
+    """True iff `value` is a usable per-million-token price: a finite,
+    strictly positive Decimal. Checking is_finite() before comparing with
+    `>` matters: Decimal's default context traps InvalidOperation on a
+    NaN/Infinity comparison, so is_finite() must short-circuit first.
+    Zero and negative rates are rejected too — a real price is never
+    free or negative."""
+    return isinstance(value, Decimal) and value.is_finite() and value > 0
+
+
 def _escalation_ready() -> bool:
     """True iff escalation can actually be attempted: ESCALATION_MODEL is a
     non-empty approved model id AND PRICING_USD_PER_MILLION_TOKENS has a
-    valid Decimal input/output rate entry for that exact model.
+    valid entry for that exact model — both `input` and `output` present
+    as finite, strictly positive Decimal rates.
 
     A model id alone is not enough to let a paid call through — setting
-    ESCALATION_MODEL without also adding its verified pricing must still
-    produce the same truthful "escalation_unavailable" outcome, never a
-    live call priced by guesswork (or not priced at all).
+    ESCALATION_MODEL without also adding its verified, valid pricing must
+    still produce the same truthful "escalation_unavailable" outcome,
+    never a live call priced by guesswork, zero, a negative number, or a
+    non-finite value (or not priced at all).
     """
     if not ESCALATION_MODEL:
         return False
     rates = PRICING_USD_PER_MILLION_TOKENS.get(ESCALATION_MODEL)
-    return (
-        isinstance(rates, dict)
-        and isinstance(rates.get("input"), Decimal)
-        and isinstance(rates.get("output"), Decimal)
-    )
+    if not isinstance(rates, dict):
+        return False
+    return _is_valid_rate(rates.get("input")) and _is_valid_rate(rates.get("output"))
 
 
 def _price(cost_breakdown: list[llm.TokenUsage]) -> tuple[int | None, int | None]:

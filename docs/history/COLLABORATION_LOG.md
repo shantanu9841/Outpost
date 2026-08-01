@@ -2467,3 +2467,118 @@ or coding sessions. It complements, but does not replace:
   model id and its verified pricing so it can be safely, boundedly
   verified per the completed plan's §6, then Slice 6 can be marked
   complete against `SPEC.md`.
+
+## 2026-08-01 — Slice 6 implementation review corrected: two further findings
+
+- Contributor/environment: Claude Code / SDE 1, running in a Claude Code
+  worktree session whose assigned working directory again did not match
+  this task's target branch/workspace (the same recurring mismatch as
+  both prior Slice 6 sessions). All edits were made directly against the
+  correct main working tree (`codex/sde-1-slice-2-hardening`, starting
+  commit `099fc67`) using absolute paths and explicit `cd`-prefixed shell
+  commands, per the same verified workaround.
+- Slice: Slice 6 (evaluation and cost-aware routing) — a second
+  implementation-review correction pass, owner-directed, against the
+  completed `docs/plans/completed/SLICE_6_PLAN.md` v4 and the prior
+  correction commit `099fc67`.
+- Role: Implementer.
+- Implementation status: Complete for both findings. Slice 6 remains
+  **not** complete against `SPEC.md` §6 — `ESCALATION_MODEL` stays
+  owner-gated and unset; unchanged by this pass.
+- Changes and corrections, one per finding:
+  1. **Reservation acquisition was not tenant-scoped.**
+     `db.try_acquire_draft_generation(workspace_id, target_id)` inserted
+     the caller-supplied `workspace_id`/`target_id` pair directly into
+     `draft_generation`. SQLite's foreign-key constraints prove each id
+     independently references a real row, but nothing previously proved
+     the referenced target actually belonged to the supplied workspace —
+     a caller passing a mismatched (workspace_id, target_id) pair (or a
+     target_id that doesn't exist) could still have inserted a
+     reservation row, purely because the acquiring statement never
+     joined against `target` to check ownership. Fixed by changing the
+     acquiring INSERT to `INSERT INTO draft_generation (workspace_id,
+     target_id, expires_at) SELECT ?, target.id, datetime('now', ?) FROM
+     target WHERE target.workspace_id = ? AND target.id = ?` — the exact
+     `INSERT ... SELECT` idiom `add_draft` already uses for the same
+     tenancy guarantee. When the WHERE clause matches no row (a
+     nonexistent target, or a target belonging to a different
+     workspace), the INSERT affects zero rows; the function now checks
+     `cursor.rowcount == 0` after the insert attempt and returns `None`
+     in that case, identical to the pre-existing "already reserved"
+     rejection path, so callers don't need to distinguish the two. This
+     is authoritative independent of any caller's own `get_target()`
+     lookup, and does not change the transaction's shape: still one
+     DELETE (reclaiming an expired row) plus one INSERT, committed
+     immediately, never held open across a network call.
+  2. **Pricing validation accepted any `Decimal`, including invalid
+     ones.** `routing._escalation_ready()` previously only checked
+     `isinstance(rates.get("input"), Decimal)` and the same for
+     `"output"` — a zero, negative, `NaN`, or infinite `Decimal` all
+     satisfied `isinstance`, so any of them would have let
+     `_escalation_ready()` return `True` and a paid escalation call
+     proceed with garbage pricing. Added `_is_valid_rate(value)`, which
+     requires `isinstance(value, Decimal) and value.is_finite() and
+     value > 0`, and `_escalation_ready()` now calls it for both
+     `"input"` and `"output"`. The `is_finite()` check is written first
+     and combined with `and` specifically so it short-circuits before
+     the `> 0` comparison: Python's default `decimal` context traps
+     `InvalidOperation` on a `NaN`/`Infinity` ordering comparison, so
+     evaluating `value > 0` before confirming finiteness would raise
+     instead of returning `False`.
+- Files or areas affected: `app/db.py`
+  (`try_acquire_draft_generation`'s INSERT and docstring),
+  `app/agent/routing.py` (`_is_valid_rate`, `_escalation_ready`),
+  `tests/test_slice6_eval_routing.py` (11 new tests: three DB-level
+  tenant-ownership tests plus a request-path "routing never called on
+  rejected acquisition" test in `DraftGenerationReservationTests`, and
+  seven pricing-validation tests plus a routing-level assertion in
+  `EscalationRequiresPricingTests`), `PROGRESS.md`, `DECISIONS.md`,
+  `collaboration.md`, and this file.
+- Verification: `python -m unittest discover -s tests` passes 292/292
+  (281 baseline plus 11 new), all mocked at the `httpx.post`/`app.llm.
+  generate_structured_with_usage` boundary — no real provider call, no
+  real key, no live Gemini/paid-provider call of any kind.
+  `test_acquire_rejects_a_target_belonging_to_another_workspace` and
+  `test_acquire_rejects_a_missing_target` call
+  `db.try_acquire_draft_generation` directly (not through the route) and
+  confirm both a `None` return and zero rows left in `draft_generation`;
+  a companion asserts the legitimately owning workspace can still
+  acquire the same target normally afterward.
+  `test_route_never_calls_routing_when_acquisition_is_rejected` calls
+  `app.main.create_draft` directly with `db.try_acquire_draft_generation`
+  mocked to return `None` and confirms `routing.route_and_draft` is never
+  invoked. The pricing tests cover valid positive rates, a missing
+  pricing entry entirely, a missing `input` or `output` key, four
+  non-`Decimal` value types, three zero/negative values, and `NaN`/
+  `Infinity`/`-Infinity` in both the `input` and `output` slot, plus one
+  routing-level test confirming `Decimal("NaN")` pricing produces
+  `routing_action == "escalation_unavailable"` with only the default
+  draft/eval calls made (`gen.call_count == 2`) and no escalation attempt.
+  `git diff --check` passed (only a pre-existing LF/CRLF autocrlf
+  warning). `git status` confirmed only `app/agent/routing.py`,
+  `app/db.py`, and `tests/test_slice6_eval_routing.py` changed for the
+  code/test fix, plus `PROGRESS.md`, `DECISIONS.md`, `collaboration.md`,
+  and this file for documentation — no unrelated file, template, seed, or
+  `requirements.txt` change; no UI template was touched by this pass, so
+  no browser/theme verification was needed. A credential-pattern scan
+  (API-key/token/private-key regexes) over the complete diff found no
+  matches. `ESCALATION_MODEL` was confirmed still `None` by direct import
+  after all changes.
+- Last known working state: `codex/sde-1-slice-2-hardening`, working tree
+  clean except for the changes described above, ready to commit. All 292
+  tests pass.
+- Known limitations: Unchanged from both prior passes — `ESCALATION_MODEL`
+  remains owner-gated and unset; the escalation tier is fully implemented
+  and mocked-tested but dormant. The `draft_generation` reservation's
+  tenant-scoping fix and the pricing validator's finite/positive
+  requirement are both defense-in-depth corrections to code that had no
+  known live exploitation path (the route's own `get_target()` call and
+  the fact that only `gemini-3.6-flash`'s real, valid pricing entry
+  exists today both already prevented practical harm) — they are
+  correctness fixes for the underlying primitives, not evidence of an
+  incident.
+- Next action: Owner review of these two corrections. If/when the owner
+  wants the escalation tier active, approve a specific stronger Gemini
+  model id and its verified pricing so it can be safely, boundedly
+  verified per the completed plan's §6, then Slice 6 can be marked
+  complete against `SPEC.md`.

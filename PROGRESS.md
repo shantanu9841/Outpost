@@ -8,11 +8,12 @@ Slices 0–5 are implemented and committed. Slice 6 (evaluation and
 cost-aware routing) is implemented, tested, and committed, but is **not**
 marked complete against `SPEC.md` §6 — the owner-gated stronger model
 (`ESCALATION_MODEL`) remains unset; see "Owner-gated: Slice 6 stronger
-model" below. A subsequent implementation-review pass corrected five
-findings (concurrent-generation spend, escalation-failure handling,
-pricing-gated escalation, an Approvals cost-summary visibility bug, and a
+model" below. Two implementation-review passes have corrected seven
+findings total (concurrent-generation spend and its tenant-ownership gap,
+escalation-failure handling, pricing-gated escalation and its finite/
+positive validation, an Approvals cost-summary visibility bug, and a
 stale SPEC.md description) — see "Slice 6 review corrections" below. The
-retained baseline is **281 passing tests** via:
+retained baseline is **292 passing tests** via:
 
 ```powershell
 python -m unittest discover -s tests
@@ -22,8 +23,9 @@ python -m unittest discover -s tests
 mock `llm.generate_structured_with_usage` instead of the now-internal
 `llm.generate_structured`, since `app/agent/drafting.py` had to switch call
 targets to capture per-attempt usage; every existing assertion/scenario is
-unchanged — plus 69 tests in `tests/test_slice6_eval_routing.py` (51 from
-the initial implementation, 18 added by the review-correction pass).)
+unchanged — plus 80 tests in `tests/test_slice6_eval_routing.py` (51 from
+the initial implementation, 18 from the first review-correction pass, 11
+from the second).)
 
 ## Implemented product
 
@@ -47,6 +49,13 @@ An implementation-review pass on the initial Slice 6 commit (`d7f2cc8`) found an
 5. **SPEC.md accuracy.** Corrected the stale claim that `app/llm.py` "falls back to the free Gemini tier" — it uses only the workspace's saved key, with no environment fallback.
 
 18 new retained tests cover all five (`tests/test_slice6_eval_routing.py`).
+
+A second review pass on that correction commit (`099fc67`) found and fixed two further gaps:
+
+6. **Reservation acquisition wasn't tenant-scoped.** `db.try_acquire_draft_generation` inserted the caller-supplied `workspace_id`/`target_id` directly — SQLite proved both ids individually existed but never proved the target actually belonged to that workspace. Fixed with a tenant-scoped `INSERT ... SELECT ... FROM target WHERE target.workspace_id = ? AND target.id = ?` (the same pattern `add_draft` uses): a target from another workspace, or a nonexistent target id, now matches zero rows and reserves nothing.
+7. **Pricing validation accepted any `Decimal`.** `routing._escalation_ready()` previously accepted zero, negative, `NaN`, and infinite rates. It now requires both `input` and `output` to be a finite, strictly positive `Decimal` (`routing._is_valid_rate`); `is_finite()` is checked before any `>` comparison since `Decimal`'s default context traps `InvalidOperation` on a NaN/Infinity comparison.
+
+11 more retained tests cover both (`tests/test_slice6_eval_routing.py`).
 
 ## Current data model
 
@@ -85,9 +94,9 @@ Every tenant-facing database function requires `workspace_id`. `draft` has a par
 - An `INVALID_GEMINI_KEY` outcome at default draft, default eval, escalated draft, or escalated eval is terminal for the rest of that routing operation, while every usage entry already collected is preserved in `cost_breakdown`.
 - `db.create_draft_with_routing` commits the draft (with its cost columns), its eval row, and every required audit row (`draft.created`, `eval.scored`, plus a routing-decision row when one applies) in one transaction, or none.
 - `db.eval`'s `draft_id UNIQUE` constraint enforces "exactly one eval per draft" at the database level, not only in application code.
-- A draft generation is reserved (`db.try_acquire_draft_generation`) before any Gemini call and released after (`finally`, plus a 300-second TTL backstop); two concurrent requests for the same workspace/target can never both incur provider spend, and the loser is turned away before generating anything.
+- A draft generation is reserved (`db.try_acquire_draft_generation`) before any Gemini call and released after (`finally`, plus a 300-second TTL backstop); two concurrent requests for the same workspace/target can never both incur provider spend, and the loser is turned away before generating anything. The reservation is tenant-scoped by its own `INSERT ... SELECT` (a target from another workspace, or a missing target, matches nothing and reserves nothing), not merely by a caller's earlier lookup.
 - An escalated draft is only ever promoted (`routing_action="escalated"`) when it reaches `DraftStatus.LLM_OK`; a provider error or ungrounded fallback during escalation keeps the already-valid default draft/eval and records `routing.escalation_failed`, never a mislabeled "escalated" result, and never spends an eval call on a body that won't be used.
-- Escalation additionally requires a verified `Decimal` pricing entry for `ESCALATION_MODEL` (`routing._escalation_ready()`); setting the model id alone cannot let a paid call through.
+- Escalation additionally requires a verified pricing entry for `ESCALATION_MODEL` (`routing._escalation_ready()`) whose `input`/`output` are each a finite, strictly positive `Decimal` — a missing key, a non-`Decimal` value, zero, a negative rate, `NaN`, or an infinite value all leave escalation unavailable; setting the model id alone cannot let a paid call through.
 - The Approvals running cost summary reflects every draft ever created in the workspace (`db.outreach_cost_summary`), shown whenever `draft_count > 0` regardless of whether the pending queue is currently empty.
 
 Implementation details and rationale are indexed in `DECISIONS.md`; retained behavior is authoritative in code and tests.

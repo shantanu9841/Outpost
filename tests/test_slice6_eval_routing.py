@@ -932,6 +932,61 @@ class DraftGenerationReservationTests(_DBFixture, unittest.TestCase):
         second = db.try_acquire_draft_generation(ws, target_id)
         self.assertIsNone(second)
 
+    def test_acquire_succeeds_for_the_correct_workspace_and_target(self):
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws, target_id))
+
+    def test_acquire_rejects_a_target_belonging_to_another_workspace(self):
+        """The tenant-ownership check that matters: SQLite proving both IDs
+        individually exist is not the same as proving the target belongs
+        to the caller's workspace. A target from ws_b must not be
+        reservable under ws_a, even though target_id is a real row."""
+        ws_a, _camp_a = self._setup_campaign("A")
+        ws_b, camp_b = self._setup_campaign("B")
+        target_in_b = self._make_target(ws_b, camp_b)
+
+        result = db.try_acquire_draft_generation(ws_a, target_in_b)
+
+        self.assertIsNone(result)
+        # And it must not have silently reserved anything under either
+        # workspace/target combination.
+        conn = db.get_connection()
+        try:
+            rows = conn.execute("SELECT * FROM draft_generation").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 0)
+        # The real owning workspace can still reserve it normally.
+        self.assertIsNotNone(db.try_acquire_draft_generation(ws_b, target_in_b))
+
+    def test_acquire_rejects_a_missing_target(self):
+        ws, _camp = self._setup_campaign()
+        result = db.try_acquire_draft_generation(ws, 999_999)
+        self.assertIsNone(result)
+        conn = db.get_connection()
+        try:
+            rows = conn.execute("SELECT * FROM draft_generation").fetchall()
+        finally:
+            conn.close()
+        self.assertEqual(len(rows), 0)
+
+    def test_route_never_calls_routing_when_acquisition_is_rejected(self):
+        """A real request-path check: whatever the reason acquisition
+        fails for, the route must never reach routing.route_and_draft."""
+        from app.main import create_draft
+
+        ws, camp = self._setup_campaign()
+        target_id = self._make_target(ws, camp)
+        workspace_row = db.get_workspace(ws)
+
+        with mock.patch(
+            "app.main.db.try_acquire_draft_generation", return_value=None
+        ), mock.patch("app.main.routing.route_and_draft") as route_mock:
+            create_draft(target_id, workspace=workspace_row)
+
+        route_mock.assert_not_called()
+
     def test_release_allows_reacquisition(self):
         ws, camp = self._setup_campaign()
         target_id = self._make_target(ws, camp)
@@ -1139,18 +1194,93 @@ class EscalationFailurePreservesDefaultTests(unittest.TestCase):
 
 
 class EscalationRequiresPricingTests(unittest.TestCase):
-    def test_escalation_ready_requires_both_model_and_pricing(self):
+    def test_valid_positive_decimal_rates_are_ready(self):
+        with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"), mock.patch.dict(
+            routing.PRICING_USD_PER_MILLION_TOKENS,
+            {"model-x": {"input": Decimal("1.50"), "output": Decimal("7.50")}},
+        ):
+            self.assertTrue(routing._escalation_ready())
+
+    def test_no_model_set_is_never_ready(self):
         with mock.patch.object(routing, "ESCALATION_MODEL", None):
             self.assertFalse(routing._escalation_ready())
         with mock.patch.object(routing, "ESCALATION_MODEL", ""):
             self.assertFalse(routing._escalation_ready())
+
+    def test_missing_pricing_entry_is_never_ready(self):
         with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"):
-            self.assertFalse(routing._escalation_ready())  # no pricing entry at all
+            self.assertNotIn("model-x", routing.PRICING_USD_PER_MILLION_TOKENS)
+            self.assertFalse(routing._escalation_ready())
+
+    def test_missing_input_or_output_key_is_never_ready(self):
         with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"), mock.patch.dict(
-            routing.PRICING_USD_PER_MILLION_TOKENS,
-            {"model-x": {"input": Decimal("1"), "output": Decimal("1")}},
+            routing.PRICING_USD_PER_MILLION_TOKENS, {"model-x": {"output": Decimal("1")}}
         ):
-            self.assertTrue(routing._escalation_ready())
+            self.assertFalse(routing._escalation_ready())
+        with mock.patch.object(routing, "ESCALATION_MODEL", "model-x"), mock.patch.dict(
+            routing.PRICING_USD_PER_MILLION_TOKENS, {"model-x": {"input": Decimal("1")}}
+        ):
+            self.assertFalse(routing._escalation_ready())
+
+    def test_non_decimal_values_are_never_ready(self):
+        for bad in (1.5, "1.50", 1, None):
+            with self.subTest(bad=bad), mock.patch.object(
+                routing, "ESCALATION_MODEL", "model-x"
+            ), mock.patch.dict(
+                routing.PRICING_USD_PER_MILLION_TOKENS,
+                {"model-x": {"input": bad, "output": Decimal("1")}},
+            ):
+                self.assertFalse(routing._escalation_ready())
+
+    def test_zero_and_negative_rates_are_never_ready(self):
+        for bad_value in (Decimal("0"), Decimal("-1"), Decimal("-0.01")):
+            with self.subTest(bad_value=bad_value), mock.patch.object(
+                routing, "ESCALATION_MODEL", "model-x"
+            ), mock.patch.dict(
+                routing.PRICING_USD_PER_MILLION_TOKENS,
+                {"model-x": {"input": bad_value, "output": Decimal("1")}},
+            ):
+                self.assertFalse(routing._escalation_ready())
+
+    def test_nan_and_infinite_rates_are_never_ready(self):
+        for bad_value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+            with self.subTest(bad_value=bad_value, slot="input"), mock.patch.object(
+                routing, "ESCALATION_MODEL", "model-x"
+            ), mock.patch.dict(
+                routing.PRICING_USD_PER_MILLION_TOKENS,
+                {"model-x": {"input": bad_value, "output": Decimal("1")}},
+            ):
+                self.assertFalse(routing._escalation_ready())
+            with self.subTest(bad_value=bad_value, slot="output"), mock.patch.object(
+                routing, "ESCALATION_MODEL", "model-x"
+            ), mock.patch.dict(
+                routing.PRICING_USD_PER_MILLION_TOKENS,
+                {"model-x": {"input": Decimal("1"), "output": bad_value}},
+            ):
+                self.assertFalse(routing._escalation_ready())
+
+    def test_invalid_pricing_never_escalates_at_the_routing_level(self):
+        """Routing-level assertion: invalid pricing (Decimal("NaN")) makes
+        escalation unavailable, and only the default draft/eval calls are
+        made -- an escalation attempt never happens."""
+        target = _target_dict(fit_score=95)
+        brief = Brief(
+            product="p", audience="a", tone="t", target_type="business",
+            niche_or_industry="n", target_countries=["United States"],
+        )
+        with mock.patch(
+            "app.llm.generate_structured_with_usage",
+            side_effect=[
+                llm.MeasuredResult(_grounded_draft(target), [_usage()]),
+                llm.MeasuredResult(_eval_result(50), [_usage()]),
+            ],
+        ) as gen, mock.patch.object(routing, "ESCALATION_MODEL", "nan-priced-model"), mock.patch.dict(
+            routing.PRICING_USD_PER_MILLION_TOKENS,
+            {"nan-priced-model": {"input": Decimal("NaN"), "output": Decimal("1")}},
+        ):
+            outcome = routing.route_and_draft(brief, target, {"gemini": "fake"}, paid_tier_enabled=True)
+        self.assertEqual(gen.call_count, 2)
+        self.assertEqual(outcome.routing_action, "escalation_unavailable")
 
     def test_escalation_model_without_pricing_entry_never_escalates(self):
         """Setting only ESCALATION_MODEL, with no matching pricing entry,
