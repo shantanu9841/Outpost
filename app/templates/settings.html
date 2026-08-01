@@ -13,7 +13,7 @@
   "youtube": "Required for live YouTube creator discovery (free quota). Without a key, creator campaigns use seed data.",
   "apify": "Required to discover Instagram and TikTok creators. Off until a key is present.",
   "apollo": "Required to discover businesses (distributors, logistics).",
-  "gemini": "Optional. Uses GEMINI_API_KEY when configured; otherwise Outpost uses its built-in demo heuristic."
+  "gemini": "Required for the default and stronger-tier model calls; without a key, Outpost uses its built-in demo heuristic at zero cost."
 } %}
 
 {% block content %}
@@ -54,6 +54,32 @@
       {% endif %}
     </div>
     {% endfor %}
+
+    <div class="key-card">
+      <div class="key-card__header">
+        <span class="key-card__label">Stronger paid model tier</span>
+        {% if paid_tier_enabled %}
+        <span class="badge badge--success">Enabled</span>
+        {% else %}
+        <span class="badge badge--muted">Disabled</span>
+        {% endif %}
+      </div>
+      <p class="key-card__hint">
+        Enable the stronger paid model tier for high-fit outreach — uses your Gemini key; your Google
+        project is billed for both the default and stronger tiers.
+        {% if not masked.gemini %}Paste a Gemini key above first.{% endif %}
+      </p>
+      <label class="checkbox-field">
+        <input
+          type="checkbox"
+          name="paid_tier_enabled"
+          value="true"
+          {% if paid_tier_enabled %}checked{% endif %}
+          {% if not masked.gemini %}disabled{% endif %}
+        />
+        Enable stronger paid tier
+      </label>
+    </div>
 
     <button class="btn btn--primary" type="submit">Save keys</button>
   </form>

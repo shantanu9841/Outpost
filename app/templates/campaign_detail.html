@@ -82,6 +82,12 @@
             {% else %}
             <a class="target-cta-link" href="{{ t.cta.href }}">{{ t.cta.label }}</a>
             {% endif %}
+            {% if t.draft_eval_score is not none %}
+            <span class="badge badge--muted">Eval {{ t.draft_eval_score }}</span>
+            {% endif %}
+            {% if t.draft_cost_display %}
+            <span class="target-cta-cost mono">{{ t.draft_cost_display }}</span>
+            {% endif %}
           </td>
         </tr>
         {% if t.fit_reasons %}

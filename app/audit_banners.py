@@ -7,6 +7,7 @@ behavior) and tests/test_slice2_hardening.py import these same maps, so what
 is tested is guaranteed to match production.
 """
 
+from app.agent.eval import EvalStatus
 from app.agent.intake import IntakeStatus
 from app.agent.scoring import ScoreStatus
 from app.sources.base import SourceStatus
@@ -171,6 +172,47 @@ SCORING_MAP: dict[ScoreStatus, tuple[str, str | None, str | None]] = {
     ),
 }
 
+# --- Slice 6: eval and routing audit actions --------------------------------
+#
+# Neither eval nor routing outcomes drive a campaign-detail banner (they're
+# shown inline on Approvals/Pipeline instead), so unlike DISCOVERY_MAP/
+# INTAKE_MAP/SCORING_MAP above these don't need a severity/template — just a
+# stable, namespaced action name plus a detail string built once at write
+# time, and an ACTION_LABELS entry so the Activity feed (label_for) renders
+# something readable for every row regardless of prefix.
+
+EVAL_SCORED = "eval.scored"
+
+
+def eval_detail(status: EvalStatus, reason: str | None, score: int) -> str:
+    """The eval.scored audit detail: status (+ sanitized reason, if any),
+    plus the score actually stored, so the Activity feed shows what
+    happened even when the top-line eval came from the heuristic fallback."""
+    base = status.value if reason is None else f"{status.value}: {reason}"
+    return f"{base} (score {score})"
+
+
+ROUTING_EARLY_EXIT = "routing.early_exit"
+ROUTING_ESCALATED = "routing.escalated"
+ROUTING_ESCALATION_UNAVAILABLE = "routing.escalation_unavailable"
+ROUTING_INVALID_KEY_TERMINAL = "routing.invalid_key_terminal"
+
+# routing_action ("default" | "early_exit" | "escalated" |
+# "escalation_unavailable" | "invalid_key_terminal", from
+# app.agent.routing.RoutingOutcome) -> the audit action to write, or None.
+# "default" intentionally maps to None: the ordinary no-escalation path
+# (no key, no opt-in, or fit below threshold) writes no extra routing audit
+# row at all (SLICE_6_PLAN.md §5.3 step 4) — draft.created/eval.scored
+# already record that this outreach happened.
+ROUTING_ACTION_FOR: dict[str, str | None] = {
+    "default": None,
+    "early_exit": ROUTING_EARLY_EXIT,
+    "escalated": ROUTING_ESCALATED,
+    "escalation_unavailable": ROUTING_ESCALATION_UNAVAILABLE,
+    "invalid_key_terminal": ROUTING_INVALID_KEY_TERMINAL,
+}
+
+
 BANNER_BY_ACTION: dict[str, tuple[str, str]] = {
     action: (severity, template)
     for action, severity, template in [
@@ -239,6 +281,11 @@ ACTION_LABELS: dict[str, str] = {
     DRAFT_APPROVED: "Draft approved",
     DRAFT_REJECTED: "Draft rejected",
     TARGET_STAGE_CHANGED: "Stage changed",
+    EVAL_SCORED: "Draft evaluated",
+    ROUTING_EARLY_EXIT: "Routed (default model, confident)",
+    ROUTING_ESCALATED: "Routed (escalated model)",
+    ROUTING_ESCALATION_UNAVAILABLE: "Escalation unavailable (no approved stronger model)",
+    ROUTING_INVALID_KEY_TERMINAL: "Routing stopped (Gemini key rejected)",
 }
 
 

@@ -373,6 +373,18 @@ body {
   align-self: flex-start;
 }
 
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.checkbox-field input[disabled] {
+  cursor: not-allowed;
+}
+
 /* Badges */
 .badge {
   display: inline-flex;
@@ -682,6 +694,13 @@ body {
   text-decoration: underline;
 }
 
+.target-cta-cost {
+  display: block;
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: var(--space-1);
+}
+
 /* Activity list (campaign detail) */
 .activity__title {
   font-size: 16px;
@@ -734,11 +753,39 @@ body {
 }
 
 /* Approvals queue */
+.cost-summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+  font-size: 13px;
+  color: var(--text-2);
+  max-width: 720px;
+}
+
+.cost-summary__figure {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+
 .approvals {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
   max-width: 720px;
+}
+
+.draft-card__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.draft-card__cost {
+  font-size: 12px;
+  color: var(--text-2);
 }
 
 .draft-card {
@@ -907,6 +954,17 @@ body {
   color: var(--text-2);
   margin: 0;
   white-space: pre-wrap;
+}
+
+.pl-card__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pl-card__cost {
+  font-size: 11px;
+  color: var(--text-3);
 }
 
 .pl-card__actions {

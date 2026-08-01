@@ -10,6 +10,18 @@
   </div>
 
   {% if drafts %}
+  <div class="cost-summary">
+    {% if cost_summary.known_cost_count > 0 %}
+    <span class="cost-summary__figure mono">~${{ "%.4f"|format(cost_summary.average_cost_microusd / 1000000) }}</span>
+    <span class="cost-summary__label">average estimated paid list-price cost per outreach</span>
+    {% if cost_summary.unknown_cost_count > 0 %}
+    <span class="badge badge--muted">{{ cost_summary.unknown_cost_count }} excluded (cost unknown)</span>
+    {% endif %}
+    {% else %}
+    <span class="cost-summary__label">No outreach with a known cost yet.</span>
+    {% endif %}
+  </div>
+
   <div class="approvals">
     {% for d in drafts %}
     <article class="draft-card" id="draft-{{ d.id }}">
@@ -23,6 +35,34 @@
         </div>
         <a class="draft-card__campaign-link" href="/campaigns/{{ d.campaign_id }}">View campaign</a>
       </div>
+
+      <div class="draft-card__meta">
+        <span class="badge badge--muted">Model: {{ d.model_used }}</span>
+        {% if d.eval_score is not none %}
+        <button
+          type="button"
+          class="caret badge badge--muted"
+          aria-expanded="false"
+          aria-controls="eval-{{ d.id }}"
+          data-fit-toggle
+        >
+          <span class="visually-hidden">Toggle eval rubric for {{ d.target_name }}</span>
+          Eval {{ d.eval_score }}
+          <span class="caret__glyph" aria-hidden="true">▸</span>
+        </button>
+        {% endif %}
+        <span class="draft-card__cost mono">{{ d.cost_display }}</span>
+      </div>
+      {% if d.eval_dimensions %}
+      <ul class="reasons-list" id="eval-{{ d.id }}" hidden>
+        {% for dim in d.eval_dimensions %}
+        <li class="reason">
+          {{ dim.label }} ({{ dim.points }}/25)
+          <span class="reason__citation">{{ dim.justification }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
 
       <form method="post" action="/drafts/{{ d.id }}/action" class="draft-card__form">
         <textarea class="input textarea" name="body" rows="7">{{ d.edited_body or d.body }}</textarea>
@@ -43,4 +83,21 @@
   </section>
   {% endif %}
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // Toggle a draft's eval-rubric row via its caret button. Same pattern as
+  // campaign_detail.html's fit-reasons toggle.
+  document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[data-fit-toggle]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var expanded = btn.getAttribute("aria-expanded") === "true";
+        var row = document.getElementById(btn.getAttribute("aria-controls"));
+        btn.setAttribute("aria-expanded", String(!expanded));
+        if (row) row.hidden = expanded;
+      });
+    });
+  });
+</script>
 {% endblock %}

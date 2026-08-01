@@ -30,6 +30,12 @@
         </div>
         <a class="pl-card__campaign-link" href="/campaigns/{{ t.campaign_id }}">View campaign</a>
         <p class="pl-card__draft">{{ t.draft_text }}</p>
+        <div class="pl-card__meta">
+          {% if t.eval_score is not none %}
+          <span class="badge badge--muted">Eval {{ t.eval_score }}</span>
+          {% endif %}
+          <span class="pl-card__cost mono">{{ t.cost_display }}</span>
+        </div>
         {% if t.next_stages %}
         <div class="pl-card__actions">
           {% for next in t.next_stages %}

@@ -356,7 +356,10 @@ class DraftGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.LLM_OK)
         self.assertEqual(result.body, draft.body)
@@ -369,7 +372,10 @@ class DraftGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="employees",
             evidence_value="9999",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.HEURISTIC_FALLBACK)
         self.assertEqual(result.model_used, "heuristic")
@@ -382,7 +388,10 @@ class DraftGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Consumer mobile apps",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.HEURISTIC_FALLBACK)
 
@@ -393,7 +402,10 @@ class DraftGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.HEURISTIC_FALLBACK)
 
@@ -412,7 +424,10 @@ class IdentityGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.HEURISTIC_FALLBACK)  # never names Acme Corp
 
@@ -426,7 +441,10 @@ class IdentityGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=draft):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(draft, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.LLM_OK)
 
@@ -440,7 +458,10 @@ class IdentityGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=grounded):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(grounded, []),
+        ):
             result = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result.status, DraftStatus.LLM_OK)
 
@@ -449,7 +470,10 @@ class IdentityGroundingTests(_EnvFixture, unittest.TestCase):
             evidence_key="industry",
             evidence_value="Wholesale distribution",
         )
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=ungrounded):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(ungrounded, []),
+        ):
             result2 = drafting.draft_outreach(_brief(), target, {"gemini": "fake"})
         self.assertEqual(result2.status, DraftStatus.HEURISTIC_FALLBACK)
 
@@ -489,7 +513,7 @@ class CredentialPathTests(_EnvFixture, unittest.TestCase):
 
     def test_invalid_key_returns_heuristic_with_reason(self):
         with mock.patch(
-            "app.agent.drafting.llm.generate_structured",
+            "app.agent.drafting.llm.generate_structured_with_usage",
             side_effect=llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "bad key"),
         ):
             result = drafting.draft_outreach(_brief(), _target_dict(), {"gemini": "fake"})
@@ -499,7 +523,7 @@ class CredentialPathTests(_EnvFixture, unittest.TestCase):
 
     def test_provider_error_returns_heuristic(self):
         with mock.patch(
-            "app.agent.drafting.llm.generate_structured",
+            "app.agent.drafting.llm.generate_structured_with_usage",
             side_effect=llm.LLMError(llm.LLMErrorKind.ERROR, "boom"),
         ):
             result = drafting.draft_outreach(_brief(), _target_dict(), {"gemini": "fake"})
@@ -507,7 +531,7 @@ class CredentialPathTests(_EnvFixture, unittest.TestCase):
         self.assertEqual(result.model_used, "heuristic")
 
     def test_known_invalid_key_reason_skips_the_live_call(self):
-        with mock.patch("app.agent.drafting.llm.generate_structured") as gen:
+        with mock.patch("app.agent.drafting.llm.generate_structured_with_usage") as gen:
             result = drafting.draft_outreach(
                 _brief(), _target_dict(), {"gemini": "fake"}, known_invalid_key_reason="already rejected"
             )
@@ -516,15 +540,18 @@ class CredentialPathTests(_EnvFixture, unittest.TestCase):
         self.assertEqual(result.reason, "already rejected")
 
     def test_never_raises(self):
-        with mock.patch("app.agent.drafting.llm.generate_structured", return_value=None):
+        with mock.patch(
+            "app.agent.drafting.llm.generate_structured_with_usage",
+            return_value=llm.MeasuredResult(None, []),
+        ):
             drafting.draft_outreach(_brief(), _target_dict(), {"gemini": "fake"})
         with mock.patch(
-            "app.agent.drafting.llm.generate_structured",
+            "app.agent.drafting.llm.generate_structured_with_usage",
             side_effect=llm.LLMError(llm.LLMErrorKind.INVALID_KEY, "x"),
         ):
             drafting.draft_outreach(_brief(), _target_dict(), {"gemini": "fake"})
         with mock.patch(
-            "app.agent.drafting.llm.generate_structured",
+            "app.agent.drafting.llm.generate_structured_with_usage",
             side_effect=llm.LLMError(llm.LLMErrorKind.ERROR, "x"),
         ):
             drafting.draft_outreach(_brief(), _target_dict(), {"gemini": "fake"})

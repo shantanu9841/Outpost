@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import audit_banners, db, sources
-from app.agent import drafting, intake, scoring
+from app.agent import drafting, intake, routing, scoring
 from app.models import Brief, TargetType
 
 # Literal mirrors of app.db's STAGES/DRAFT_STATUSES tuples, so FastAPI
@@ -132,7 +132,12 @@ def settings_page(
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {**nav_context(workspace), "setting_keys": db.SETTING_KEYS, "masked": masked},
+        {
+            **nav_context(workspace),
+            "setting_keys": db.SETTING_KEYS,
+            "masked": masked,
+            "paid_tier_enabled": db.get_paid_tier_enabled(workspace["id"]),
+        },
     )
 
 
@@ -143,6 +148,7 @@ def save_settings(
     apify: str = Form(default=""),
     apollo: str = Form(default=""),
     gemini: str = Form(default=""),
+    paid_tier_enabled: bool = Form(default=False),
 ) -> RedirectResponse:
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
@@ -154,6 +160,8 @@ def save_settings(
         # overwrite the saved key with an empty string.
         if key_value.strip():
             db.save_setting(workspace["id"], key_name, key_value.strip())
+
+    db.set_paid_tier_enabled(workspace["id"], paid_tier_enabled)
 
     return RedirectResponse("/settings", status_code=303)
 
@@ -297,6 +305,58 @@ def create_campaign(
     return RedirectResponse(f"/campaigns/{campaign_id}", status_code=303)
 
 
+def _cost_display(cost_tokens: int | None, estimated_cost_microusd: int | None, cost_breakdown_json: str | None) -> str:
+    """The Approvals/Pipeline cost line (SLICE_6_PLAN.md §5.7): distinguishes
+    "no Gemini request was ever issued" (cost_breakdown_json == "[]", the
+    only genuinely zero-cost case) from "unknown" (an issued attempt's usage
+    or pricing couldn't be determined) from a normal known estimate. Never
+    says "free" — always "estimated paid list-price cost" per decision 13.
+    """
+    if not cost_breakdown_json:
+        return "cost unknown"  # pre-Slice-6 draft; no cost data was ever recorded
+    try:
+        breakdown = json.loads(cost_breakdown_json)
+    except (json.JSONDecodeError, TypeError):
+        return "cost unknown"
+    if not breakdown:
+        return "0 tokens (heuristic, no cost)"
+    if cost_tokens is None or estimated_cost_microusd is None:
+        return "cost unknown"
+    dollars = estimated_cost_microusd / 1_000_000
+    return f"{cost_tokens} tokens · ~${dollars:.4f} estimated paid list-price cost"
+
+
+# Ordered so the rubric always renders in the same sequence as SPEC.md §4.8
+# names the four dimensions, regardless of dict iteration order.
+_EVAL_DIMENSION_LABELS = [
+    ("personalization", "Personalization"),
+    ("specificity", "Specificity"),
+    ("non_genericness", "Non-generic"),
+    ("clear_ask", "Clear ask"),
+]
+
+
+def _eval_dimensions(rubric_json: str | None) -> list[dict] | None:
+    """Parse a persisted eval.rubric_json into the four-dimension list the
+    Approvals card expands to show, or None if this draft has no eval row
+    (a pre-Slice-6 draft)."""
+    if not rubric_json:
+        return None
+    try:
+        rubric = json.loads(rubric_json)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return [
+        {
+            "key": key,
+            "label": label,
+            "points": rubric.get(key, {}).get("points"),
+            "justification": rubric.get(key, {}).get("justification"),
+        }
+        for key, label in _EVAL_DIMENSION_LABELS
+    ]
+
+
 def _fit_class(fit_score: int | None) -> str | None:
     """Design.md's fit-score coloring band, computed here so the template
     stays logic-light: >=85 success, 70-84 text, <70 text-3."""
@@ -347,6 +407,20 @@ def campaign_detail(
         raw = json.loads(t["raw_json"]) if t["raw_json"] else {}
         fit_reasons = json.loads(t["fit_reasons_json"]) if t["fit_reasons_json"] else []
         latest_draft = db.get_latest_draft_for_target(workspace_id, t["id"])
+        # Lighter than Approvals (SLICE_6_PLAN.md §5.7): eval score + cost
+        # shown per row where a draft exists, no new controls. A target
+        # with no draft yet (or one whose draft predates Slice 6) shows
+        # neither.
+        draft_eval_score = None
+        draft_cost_display = None
+        if latest_draft is not None:
+            draft_eval_score = db.get_eval_for_draft(workspace_id, latest_draft["id"])
+            draft_eval_score = draft_eval_score["score"] if draft_eval_score is not None else None
+            draft_cost_display = _cost_display(
+                latest_draft["cost_tokens"],
+                latest_draft["estimated_cost_microusd"],
+                latest_draft["cost_breakdown_json"],
+            )
         targets.append(
             {
                 **dict(t),
@@ -355,6 +429,8 @@ def campaign_detail(
                 "fit_reasons": fit_reasons,
                 "fit_class": _fit_class(t["fit_score"]),
                 "cta": _draft_cta(t["id"], latest_draft),
+                "draft_eval_score": draft_eval_score,
+                "draft_cost_display": draft_cost_display,
             }
         )
 
@@ -442,12 +518,16 @@ def create_draft(
     brief = Brief.model_validate_json(campaign["brief_json"])
 
     settings = db.get_settings(workspace_id)
-    result = drafting.draft_outreach(brief, dict(target), settings)
+    # The workspace-scoped paid-tier lookup happens here, once, at the one
+    # call site that already has workspace_id in scope — routing.py itself
+    # performs no database access at all (SLICE_6_PLAN.md §0.2 correction 4).
+    paid_tier_enabled = db.get_paid_tier_enabled(workspace_id)
+    outcome = routing.route_and_draft(
+        brief, dict(target), settings, paid_tier_enabled=paid_tier_enabled
+    )
 
     try:
-        db.add_draft(
-            workspace_id, target_id, result.body, result.model_used, result.status, result.reason
-        )
+        db.create_draft_with_routing(workspace_id, target_id, outcome)
     except db.ActiveDraftExists:
         # Lost the race against a concurrent draft request; the winner's
         # draft is already in the queue.
@@ -466,12 +546,26 @@ def approvals_list(
     if workspace is None:
         return RedirectResponse("/workspaces/new", status_code=303)
 
+    workspace_id = workspace["id"]
     drafts = [
-        {**dict(d), "fit_class": _fit_class(d["target_fit_score"])}
-        for d in db.list_pending_drafts(workspace["id"])
+        {
+            **dict(d),
+            "fit_class": _fit_class(d["target_fit_score"]),
+            "cost_display": _cost_display(
+                d["cost_tokens"], d["estimated_cost_microusd"], d["cost_breakdown_json"]
+            ),
+            "eval_dimensions": _eval_dimensions(d["eval_rubric_json"]),
+        }
+        for d in db.list_pending_drafts(workspace_id)
     ]
     return templates.TemplateResponse(
-        request, "approvals.html", {**nav_context(workspace), "drafts": drafts}
+        request,
+        "approvals.html",
+        {
+            **nav_context(workspace),
+            "drafts": drafts,
+            "cost_summary": db.outreach_cost_summary(workspace_id),
+        },
     )
 
 
@@ -523,6 +617,9 @@ def pipeline_board(
                 # before "Decline" — never derived from dict/set iteration
                 # order, which Python does not guarantee to match STAGES.
                 "next_stages": sorted(db.STAGE_TRANSITIONS[stage], key=db.STAGES.index),
+                "cost_display": _cost_display(
+                    t["cost_tokens"], t["estimated_cost_microusd"], t["cost_breakdown_json"]
+                ),
             }
         )
 

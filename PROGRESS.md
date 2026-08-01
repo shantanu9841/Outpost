@@ -4,14 +4,21 @@ Read this at the start of every session. It is a current snapshot, not a chronol
 
 ## Current state
 
-Slices 0–5 are implemented and committed. The retained baseline is **212 passing tests** via:
+Slices 0–5 are implemented and committed. Slice 6 (evaluation and
+cost-aware routing) is implemented, tested, and committed, but is **not**
+marked complete against `SPEC.md` §6 — the owner-gated stronger model
+(`ESCALATION_MODEL`) remains unset; see "Owner-gated: Slice 6 stronger
+model" below. The retained baseline is **263 passing tests** via:
 
 ```powershell
 python -m unittest discover -s tests
 ```
 
-(171 pre-Slice-5 tests, unchanged, plus 41 new tests in
-`tests/test_slice5_creators.py`.)
+(212 pre-Slice-6 tests — 9 updated in `tests/test_slice4_drafting.py` to
+mock `llm.generate_structured_with_usage` instead of the now-internal
+`llm.generate_structured`, since `app/agent/drafting.py` had to switch call
+targets to capture per-attempt usage; every existing assertion/scenario is
+unchanged — plus 51 new tests in `tests/test_slice6_eval_routing.py`.)
 
 ## Implemented product
 
@@ -22,19 +29,21 @@ python -m unittest discover -s tests
 - **Drafting and approvals:** Gemini or the deterministic zero-key heuristic produces evidence-referencing drafts, for both business and creator targets. Model drafts pass a runtime grounding gate. A human can save, approve, or reject; approving commits the textarea's current normalized text.
 - **Pipeline:** Approved targets enter queued/contacted/replied/live/declined state transitions. Illegal transitions are controlled conflicts, same-stage requests are no-ops, and stage changes require an approved draft.
 - **Audit:** Intake, discovery (business and creator, namespaced separately so no action key collides), scoring, draft, approval, rejection, and stage actions are recorded. Slice 4 mutations commit their required audit row atomically with the state change.
+- **Evaluation and cost-aware routing (Slice 6):** every drafted outreach is scored against a fully-specified four-dimension rubric (personalization, specificity, non-genericness, clear ask) — an LLM judge when a Gemini key is present, else a deterministic heuristic that produces the identical shape. `app/agent/routing.py` drafts with the default model (`gemini-3.6-flash`) or the zero-key heuristic, and escalates to a stronger paid tier only when the workspace's own key, an explicit `paid_tier_enabled` opt-in, and a high fit score (`>= 85`) all hold — escalation is fully implemented and tested but dormant (`ESCALATION_MODEL = None`) until the owner approves a specific stronger model id. An `INVALID_GEMINI_KEY` outcome at any of the four model-backed stages (default draft, default eval, escalated draft, escalated eval) is terminal for the rest of that outreach, preserving every usage entry already collected. Every issued Gemini HTTP attempt — success or failure — produces one `TokenUsage` record; `cost_tokens`/`estimated_cost_microusd` are `NULL` (unknown) whenever any issued attempt's usage or pricing is unreadable, and `0` (known) only when no Gemini request was ever issued. Pricing sums each attempt's exact `Decimal` contribution at its own model's rate and rounds once (`ROUND_HALF_UP`) to integer micro-USD; no binary floats, no per-attempt rounding. The Gemini key is sent only via the `x-goog-api-key` header (no query parameter) and there is no `GEMINI_API_KEY` environment fallback anywhere — every LLM workflow is workspace-key-only. Approvals shows model used, an expandable eval-rubric badge, per-outreach cost (or "cost unknown" / "0 tokens (heuristic, no cost)"), and a running average cost-per-outreach; Pipeline and campaign detail show the same figures more lightly.
 
 ## Current data model
 
 `app/db.py` creates these SQLite tables idempotently without resetting local data:
 
-- `workspace`
+- `workspace` — plus an idempotently migrated `paid_tier_enabled` column (default off).
 - `workspace_setting`
 - `campaign`
 - `target`
 - `audit`
-- `draft`
+- `draft` — plus idempotently migrated `cost_breakdown_json` and `estimated_cost_microusd` columns.
+- `eval` (Slice 6) — one row per draft (`draft_id UNIQUE`), `rubric_json` + `score`.
 
-Every tenant-facing database function requires `workspace_id`. `draft` has a partial unique index allowing at most one non-rejected draft per target. `cost_tokens` exists on `draft` for Slice 6 and is not populated yet.
+Every tenant-facing database function requires `workspace_id`. `draft` has a partial unique index allowing at most one non-rejected draft per target, and `eval` a unique index on `draft_id` allowing at most one eval per draft. `cost_tokens` on `draft` is now populated by `db.create_draft_with_routing`, the one atomic writer of a routed draft's body, cost columns, eval row, and every required audit row.
 
 ## Active implementation guarantees
 
@@ -52,6 +61,12 @@ Every tenant-facing database function requires `workspace_id`. `draft` has a par
 - Every creator source (YouTube, Apify's Instagram/TikTok actors, creator seed) sets a controlled `_outpost_platform` marker on `Candidate.raw` from its own constant, never an untrusted provider field; `target.source` stays the source-level value (`youtube`/`apify`/`seed`) and `campaign_detail` renders the platform label from the persisted marker.
 - `evidence_for(source_used, target_type, candidate)` dispatches seed's business/creator normalizers by `target_type` so the two shapes (business vs creator) can never collide under `source_used == "seed"`.
 - Business and creator discovery audit actions are namespaced so no key collides (`discovery.apollo_ok` vs `discovery.apify_ok`/`discovery.youtube_ok`; `discovery.seed_error` vs `discovery.creator_seed_error`, etc.).
+- `app/llm.py` resolves the Gemini key strictly from the workspace's own saved setting — no `GEMINI_API_KEY` environment fallback anywhere, and a key present only in the process environment can never trigger drafting, evaluation, or escalation.
+- Every issued Gemini HTTP attempt (success, transport failure, non-2xx, malformed body, or missing `usageMetadata`) produces exactly one `TokenUsage` record via `llm._extract_usage`; only "no request issued at all" (no workspace key) is a genuinely empty usage list.
+- `app.agent.routing.route_and_draft` takes `paid_tier_enabled` as an explicit argument and performs no database access of any kind; `main.py`'s `create_draft` resolves the workspace-scoped flag once, before calling it.
+- An `INVALID_GEMINI_KEY` outcome at default draft, default eval, escalated draft, or escalated eval is terminal for the rest of that routing operation, while every usage entry already collected is preserved in `cost_breakdown`.
+- `db.create_draft_with_routing` commits the draft (with its cost columns), its eval row, and every required audit row (`draft.created`, `eval.scored`, plus a routing-decision row when one applies) in one transaction, or none.
+- `db.eval`'s `draft_id UNIQUE` constraint enforces "exactly one eval per draft" at the database level, not only in application code.
 
 Implementation details and rationale are indexed in `DECISIONS.md`; retained behavior is authoritative in code and tests.
 
@@ -61,6 +76,22 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
 - **Apollo:** The owner's plan-limited key was live-verified to return the expected insufficient-plan response, which maps to seeded fallback with a truthful warning.
 - **Apify/YouTube:** Live-verified 2026-07-31 with synthetic invalid credentials only (no owner key was authorized this session): Apify's start-run returns `401`/`user-or-token-not-found` for a bogus Bearer token; YouTube's `search.list` returns `400`/`INVALID_ARGUMENT`/"API key not valid" for a bogus `X-goog-api-key` header. Both confirm the §5.4 `INVALID_KEY` mapping and the header-auth transport (no credential-bearing URL). The owner-authorized bounded happy-path leg of §7.2 was not run — no `youtube`/`apify` workspace key was made available this session — so a full live creator discovery run remains unverified; the zero-key seed path and the mocked test suite (`tests/test_slice5_creators.py`) are the primary coverage.
 - **Zero-key mode:** Intake, seed discovery (business and creator), heuristic scoring (business and creator), grounded heuristic drafting, approval, and pipeline flows have been verified end to end, including through a live browser session (see `docs/history/COLLABORATION_LOG.md`).
+
+## Owner-gated: Slice 6 stronger model
+
+Slice 6's escalation tier (`app/agent/routing.py`) is fully implemented,
+mocked-tested, and wired into the UI, but **dormant**: `ESCALATION_MODEL =
+None` is the code gate, and `PRICING_USD_PER_MILLION_TOKENS` has no entry
+for it. It stays this way — and Slice 6 stays **not complete** against
+`SPEC.md` §6's "high-fit targets route to the better model only when a key
+exists" — until the owner approves a specific stronger Gemini model id and
+that model passes the same kind of safe, bounded live verification Slice 5
+used for Apify/YouTube. No paid live verification has been performed or
+authorized this session. This is a documentation/completion-tracking state,
+not a bug: every acceptance criterion that *can* be verified without that
+model (the default-tier path, terminal invalid-key handling, cost
+accounting, the eval rubric, tenant isolation, atomicity) is implemented and
+passing.
 
 ## Known limitations
 
@@ -82,6 +113,18 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
 - No live end-to-end creator discovery run (Apify or YouTube) has been
   performed — it requires an owner-provided key, which was not available
   this session.
+- No automated test suite covers a real Gemini `usageMetadata` response
+  shape live — `tests/test_slice6_eval_routing.py` is fully mocked at the
+  `httpx`/`llm` boundary per collaboration.md rule 9's "no paid live
+  verification without explicit authorization." The `thoughtsTokenCount`
+  derivation rule (`app/llm.py`'s `_derive_thinking`) is this plan's own
+  interpretation of safe derivation for tool-free structured-output calls,
+  unconfirmed against a real response.
+- The eval judge always runs on the default model (`gemini-3.6-flash`),
+  never the escalation model, per `docs/plans/completed/SLICE_6_PLAN.md`
+  §5.3 — only drafting escalates.
+- Re-evaluating a human-edited draft body is out of scope (SPEC.md §4.8):
+  eval scores the agent's created draft once, not the human's later edit.
 
 ## Slice checklist
 
@@ -91,19 +134,23 @@ Implementation details and rationale are indexed in `DECISIONS.md`; retained beh
 - [x] Slice 3: Fit scoring with grounded citations
 - [x] Slice 4: Drafting, approval queue, and pipeline
 - [x] Slice 5: Creator sources and demo mode
-- [ ] Slice 6: Evaluation and cost-aware routing
+- [~] Slice 6: Evaluation and cost-aware routing — implemented, tested, and
+  committed; not complete against `SPEC.md` until `ESCALATION_MODEL` is
+  owner-approved and safely verified (see "Owner-gated" above).
 
-## Next action: Slice 6 (evaluation and cost-aware routing)
+## Next action: owner review of Slice 6, then the stronger-model gate
 
-Per `SPEC.md` §6's Slice 6 and this file's Build discipline: recommend a
-model, use plan mode, and confirm the plan against `SPEC.md` before writing
-any code. If the owner wants a live creator discovery run first, that only
-needs a `youtube` and/or `apify` key pasted into a workspace's Settings —
-no code change required.
+Slice 6 is implemented and committed on the default-tier path. The next
+action is owner review, and — if/when the owner wants the escalation tier
+active — approving a specific stronger Gemini model id so it can be safely
+verified per `docs/plans/completed/SLICE_6_PLAN.md` §6's "Safe live
+verification." If the owner wants a live creator discovery run instead,
+that only needs a `youtube` and/or `apify` key pasted into a workspace's
+Settings — no code change required.
 
 ## Relevant references
 
-- Product scope and Slice 6 requirements: `SPEC.md`
+- Product scope: `SPEC.md`
 - Active constraints: `DECISIONS.md`
 - Current collaboration handoff: `collaboration.md`
 - Completed implementation plans:
@@ -111,6 +158,8 @@ no code change required.
   - `docs/plans/completed/SLICE_3_PLAN.md`
   - `docs/plans/completed/SLICE_4_PLAN.md`
   - `docs/plans/completed/SLICE_5_PLAN.md`
+  - `docs/plans/completed/SLICE_6_PLAN.md` (implementation complete;
+    `ESCALATION_MODEL` remains owner-gated — see "Owner-gated" above)
 - Detailed decision and collaboration history:
   - `docs/history/DECISIONS_LOG.md`
   - `docs/history/COLLABORATION_LOG.md`

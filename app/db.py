@@ -8,8 +8,11 @@ a TypeError at call time, not a silent cross-tenant data leak.
 
 import json
 import sqlite3
+from dataclasses import asdict
 from pathlib import Path
 
+from app import audit_banners
+from app.agent.routing import RoutingOutcome
 from app.agent.scoring import TargetScore
 from app.models import Candidate, validate_draft_body
 
@@ -45,6 +48,13 @@ STAGE_TRANSITIONS = {
 class NotFound(Exception):
     """id absent, in another workspace, or (for a stage change) not yet
     admitted to the pipeline -> route redirects."""
+
+
+class EvalAlreadyExists(Exception):
+    """The eval.draft_id UNIQUE constraint (exactly one eval per draft,
+    SPEC.md §3) was violated -> a bug in the caller, never a normal race
+    (create_draft_with_routing is the only writer, and it inserts the draft
+    and its eval together in the same transaction)."""
 
 
 class InvalidTransition(Exception):
@@ -174,9 +184,43 @@ def init() -> None:
         conn.execute(
             "UPDATE workspace_setting SET key_name = 'gemini' WHERE key_name = 'llm'"
         )
+
+        # Slice 6: paid-tier opt-in (default off, so every pre-existing
+        # workspace stays opted out after this migration) and per-draft cost
+        # columns, added idempotently so re-running init() on an already
+        # migrated database is always a no-op.
+        _add_column_if_missing(
+            conn, "workspace", "paid_tier_enabled", "INTEGER NOT NULL DEFAULT 0"
+        )
+        _add_column_if_missing(conn, "draft", "cost_breakdown_json", "TEXT")
+        _add_column_if_missing(conn, "draft", "estimated_cost_microusd", "INTEGER")
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS eval (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                workspace_id  INTEGER NOT NULL REFERENCES workspace(id),
+                draft_id      INTEGER NOT NULL UNIQUE REFERENCES draft(id),
+                rubric_json   TEXT    NOT NULL,
+                score         INTEGER NOT NULL,
+                created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+
         conn.commit()
     finally:
         conn.close()
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """Idempotent ALTER TABLE ... ADD COLUMN, guarded by PRAGMA table_info
+    since SQLite has no "ADD COLUMN IF NOT EXISTS" — safe to call on every
+    startup against an already-migrated database (CLAUDE.md's Local data
+    rule: schema initialization never resets or loses existing rows)."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 # --- Workspaces ---------------------------------------------------------
@@ -213,6 +257,35 @@ def get_workspace(workspace_id: int) -> sqlite3.Row | None:
         return conn.execute(
             "SELECT * FROM workspace WHERE id = ?", (workspace_id,)
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def get_paid_tier_enabled(workspace_id: int) -> bool:
+    """Whether this workspace has opted into the stronger paid Gemini tier.
+    Defaults to False for a missing/unknown workspace_id rather than raising,
+    matching every other workspace-scoped read's "not found -> falsy" shape."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT paid_tier_enabled FROM workspace WHERE id = ?", (workspace_id,)
+        ).fetchone()
+        return bool(row["paid_tier_enabled"]) if row is not None else False
+    finally:
+        conn.close()
+
+
+def set_paid_tier_enabled(workspace_id: int, enabled: bool) -> None:
+    """Set this workspace's paid-tier opt-in. The only writer of this
+    column — never touched by app.agent.routing, which takes the resolved
+    boolean as a plain argument instead of reading it itself."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE workspace SET paid_tier_enabled = ? WHERE id = ?",
+            (1 if enabled else 0, workspace_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -561,6 +634,133 @@ def add_draft(
         conn.close()
 
 
+def _usage_to_dict(usage) -> dict:
+    """One TokenUsage dataclass -> a plain dict for cost_breakdown_json.
+    Every field is a model name, plain int/None, or bool — never a provider
+    payload, header, or credential (app.llm's usage-accounting guarantee)."""
+    return asdict(usage)
+
+
+def create_draft_with_routing(
+    workspace_id: int, target_id: int, outcome: RoutingOutcome, actor: str = "agent"
+) -> int:
+    """Insert the routed draft (with its cost columns), its eval row, and
+    every required audit row (draft.created, eval.scored, and a
+    routing-decision row when one applies) in one transaction — all or
+    nothing (non-negotiable #7/SLICE_6_PLAN.md §3).
+
+    `outcome` is an app.agent.routing.RoutingOutcome. Tenancy is enforced by
+    the draft INSERT itself, exactly like add_draft: INSERT ... SELECT only
+    produces a row when target_id resolves inside THIS workspace.
+    """
+    draft_detail = (
+        outcome.draft_status.value
+        if outcome.draft_reason is None
+        else f"{outcome.draft_status.value}: {outcome.draft_reason}"
+    )
+    cost_breakdown_json = json.dumps([_usage_to_dict(u) for u in outcome.cost_breakdown])
+
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO draft
+                (workspace_id, target_id, body, status, model_used,
+                 cost_tokens, cost_breakdown_json, estimated_cost_microusd)
+            SELECT ?, target.id, ?, 'pending', ?, ?, ?, ?
+            FROM target
+            WHERE target.workspace_id = ? AND target.id = ?
+            """,
+            (
+                workspace_id, outcome.body, outcome.model_used, outcome.cost_tokens,
+                cost_breakdown_json, outcome.estimated_cost_microusd, workspace_id, target_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            raise NotFound
+        draft_id = cursor.lastrowid
+        campaign_id = conn.execute(
+            "SELECT campaign_id FROM target WHERE id = ?", (target_id,)
+        ).fetchone()["campaign_id"]
+
+        _insert_audit(
+            conn, workspace_id, campaign_id, actor, "draft.created", draft_detail, target_id, draft_id
+        )
+
+        eval_audit_detail = audit_banners.eval_detail(
+            outcome.eval_status, outcome.eval_reason, outcome.eval_result.score
+        )
+        conn.execute(
+            "INSERT INTO eval (workspace_id, draft_id, rubric_json, score) VALUES (?, ?, ?, ?)",
+            (workspace_id, draft_id, outcome.eval_result.rubric.model_dump_json(), outcome.eval_result.score),
+        )
+        _insert_audit(
+            conn, workspace_id, campaign_id, "agent", audit_banners.EVAL_SCORED,
+            eval_audit_detail, target_id, draft_id,
+        )
+
+        routing_action = audit_banners.ROUTING_ACTION_FOR.get(outcome.routing_action)
+        if routing_action is not None:
+            _insert_audit(
+                conn, workspace_id, campaign_id, "agent", routing_action,
+                outcome.routing_detail, target_id, draft_id,
+            )
+
+        conn.commit()
+        return draft_id
+    except sqlite3.IntegrityError as exc:
+        conn.rollback()
+        if _is_active_draft_conflict(exc):
+            raise ActiveDraftExists from exc
+        if "eval.draft_id" in str(exc) and "UNIQUE constraint failed" in str(exc):
+            raise EvalAlreadyExists from exc
+        raise
+    finally:
+        conn.close()
+
+
+def get_eval_for_draft(workspace_id: int, draft_id: int) -> sqlite3.Row | None:
+    """Return the eval row for one draft, scoped to this workspace, or None."""
+    conn = get_connection()
+    try:
+        return conn.execute(
+            """
+            SELECT eval.* FROM eval
+            JOIN draft ON draft.id = eval.draft_id AND draft.workspace_id = eval.workspace_id
+            WHERE eval.workspace_id = ? AND eval.draft_id = ?
+            """,
+            (workspace_id, draft_id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def outreach_cost_summary(workspace_id: int) -> dict:
+    """A running cost-per-outreach figure for this workspace: the average
+    estimated_cost_microusd among drafts with a KNOWN cost, plus how many
+    drafts have an unknown cost (so the average is never silently computed
+    over a partial, misleadingly-labeled set) and the total draft count."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT estimated_cost_microusd FROM draft WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    known = [r["estimated_cost_microusd"] for r in rows if r["estimated_cost_microusd"] is not None]
+    unknown_count = len(rows) - len(known)
+    average_microusd = round(sum(known) / len(known)) if known else None
+    return {
+        "draft_count": len(rows),
+        "known_cost_count": len(known),
+        "unknown_cost_count": unknown_count,
+        "average_cost_microusd": average_microusd,
+    }
+
+
 def get_draft(workspace_id: int, draft_id: int) -> sqlite3.Row | None:
     """Return one draft scoped to this workspace, or None if it isn't found."""
     conn = get_connection()
@@ -644,15 +844,19 @@ def has_approved_draft(workspace_id: int, target_id: int) -> bool:
 
 def list_pending_drafts(workspace_id: int) -> list[sqlite3.Row]:
     """The Approvals queue: pending/edited drafts joined with their target
-    for name/fit/campaign context. Both workspace_ids qualified."""
+    for name/fit/campaign context, plus this draft's eval (Slice 6), if one
+    exists — a draft created before Slice 6 has no eval row, hence LEFT JOIN.
+    Both workspace_ids qualified throughout."""
     conn = get_connection()
     try:
         return conn.execute(
             """
             SELECT draft.*, target.name AS target_name, target.fit_score AS target_fit_score,
-                   target.campaign_id AS campaign_id
+                   target.campaign_id AS campaign_id,
+                   eval.score AS eval_score, eval.rubric_json AS eval_rubric_json
             FROM draft
             JOIN target ON target.id = draft.target_id AND target.workspace_id = draft.workspace_id
+            LEFT JOIN eval ON eval.draft_id = draft.id AND eval.workspace_id = draft.workspace_id
             WHERE draft.workspace_id = ? AND draft.status IN ('pending', 'edited')
             ORDER BY draft.id
             """,
@@ -794,7 +998,9 @@ def reject_draft(workspace_id: int, draft_id: int, actor: str = "human") -> None
 def list_pipeline_targets(workspace_id: int) -> list[sqlite3.Row]:
     """Targets with an approved draft, each appearing at most once. The
     shown draft is the most recent (MAX id) among that target's approved
-    drafts, and its text is COALESCE(edited_body, body). Both
+    drafts, and its text is COALESCE(edited_body, body). Also carries that
+    draft's eval score and cost (Slice 6), LEFT JOINed since a pre-Slice-6
+    draft has neither an eval row nor cost columns populated. Both
     workspace_ids qualified in every join."""
     conn = get_connection()
     try:
@@ -803,7 +1009,9 @@ def list_pipeline_targets(workspace_id: int) -> list[sqlite3.Row]:
             SELECT target.id AS target_id, target.name AS target_name,
                    target.fit_score AS target_fit_score, target.campaign_id AS campaign_id,
                    target.stage AS stage,
-                   d.id AS draft_id, COALESCE(d.edited_body, d.body) AS draft_text
+                   d.id AS draft_id, COALESCE(d.edited_body, d.body) AS draft_text,
+                   d.cost_tokens AS cost_tokens, d.estimated_cost_microusd AS estimated_cost_microusd,
+                   d.cost_breakdown_json AS cost_breakdown_json, eval.score AS eval_score
             FROM target
             JOIN (
                 SELECT target_id, MAX(id) AS draft_id
@@ -812,6 +1020,7 @@ def list_pipeline_targets(workspace_id: int) -> list[sqlite3.Row]:
                 GROUP BY target_id
             ) latest ON latest.target_id = target.id
             JOIN draft d ON d.id = latest.draft_id AND d.workspace_id = target.workspace_id
+            LEFT JOIN eval ON eval.draft_id = d.id AND eval.workspace_id = d.workspace_id
             WHERE target.workspace_id = ?
             ORDER BY target.id
             """,

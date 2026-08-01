@@ -1,12 +1,22 @@
-# Slice 6 Plan — Evaluation and cost-aware routing
+# Slice 6 Plan — Evaluation and cost-aware routing (completed)
 
-**Status:** Planning only (draft for owner review). This is **v4**,
-correcting three final SDE 2 review findings against v3 (`4026021`), which
-followed the v1→v2 and v2→v3 correction passes — see §0 for the full
-correction history. No application code, tests, templates, or schema change
-is part of this document. Implementation does not begin until the owner
-approves this plan, confirms no changes remain outstanding, and confirms the
-model switch (`CLAUDE.md`).
+**Status:** Implemented, tested, and committed on Sonnet per the owner's
+authorization of this v4 plan. All §6 acceptance criteria that can be
+verified without the stronger escalation model pass (263 retained tests:
+212 pre-Slice-6 plus 51 new in `tests/test_slice6_eval_routing.py`).
+**Slice 6 is not yet complete against `SPEC.md` §6**: `ESCALATION_MODEL`
+remains owner-gated and unset (decision 5/6 below) — see `PROGRESS.md`'s
+"Owner-gated: Slice 6 stronger model" section for what that means and what
+unblocks it. This document is retained as the implementation's source of
+truth; the original "planning only" text below is historical.
+
+**Original status (superseded by the above):** Planning only (draft for
+owner review). This is **v4**, correcting three final SDE 2 review findings
+against v3 (`4026021`), which followed the v1→v2 and v2→v3 correction
+passes — see §0 for the full correction history. No application code,
+tests, templates, or schema change is part of this document. Implementation
+does not begin until the owner approves this plan, confirms no changes
+remain outstanding, and confirms the model switch (`CLAUDE.md`).
 
 **Model:** Planned on **Opus 4.8** (routing/eval architecture is real
 judgment). Execution recommendation is **Sonnet** (mechanical implementation

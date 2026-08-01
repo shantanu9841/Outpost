@@ -2181,3 +2181,135 @@ or coding sessions. It complements, but does not replace:
 - Last known working state: Branch `codex/sde-1-slice-2-hardening`; application baseline remains `b640b49` at the completed Slice 5 state. The v4 plan is based on v3 planning commit `4026021`.
 - Known limitations: The stronger escalation-model id and its pricing remain deliberately owner-gated and unverified. Slice 6 cannot be marked complete against `SPEC.md` until the owner approves that model and the required safe verification gate passes. The `thoughtsTokenCount` derivation remains an explicitly documented assumption for optional safe verification.
 - Next action: Owner performs final review of `docs/plans/SLICE_6_PLAN.md` v4. Do not begin Slice 6 implementation until the owner explicitly approves the plan and confirms the required model switch.
+
+## 2026-08-01 — Slice 6 implemented: evaluation and cost-aware routing
+
+- Contributor/environment: Claude Code / SDE 1, running in a Claude Code
+  worktree session (`outpost-slice-6-impl-066cf9`) whose assigned working
+  directory did not match this task's target branch/workspace; per this
+  session's own worktree-mismatch check, all edits were made directly
+  against the correct main working tree (`codex/sde-1-slice-2-hardening`,
+  starting commit `f052a10`) rather than the stale bound worktree, using
+  absolute paths and explicit `cd`-prefixed shell commands throughout.
+- Slice: Slice 6 (evaluation and cost-aware routing) — full implementation,
+  per owner-approved `docs/plans/completed/SLICE_6_PLAN.md` v4.
+- Role: Implementer.
+- Implementation status: Complete against the plan's own scope. **Not**
+  complete against `SPEC.md` §6 — `ESCALATION_MODEL` remains owner-gated
+  and unset; see Known limitations below.
+- Changes and corrections: Implemented the plan end to end. New:
+  `app/agent/eval.py` (`evaluate_draft`, `EvalOutcome`/`EvalStatus`, the
+  fully-specified four-dimension deterministic heuristic rubric reusing
+  `drafting._recipient_identity`/`_norm_for_substring`/`_parse_fit_reasons`/
+  `BANNED_FILLER_PHRASES` rather than duplicating them), `app/agent/
+  routing.py` (`route_and_draft`, `RoutingOutcome`, `_price`,
+  `PRICING_USD_PER_MILLION_TOKENS`, `HIGH_FIT_THRESHOLD`/
+  `CONFIDENCE_THRESHOLD`, `ESCALATION_MODEL = None`; takes
+  `paid_tier_enabled` as an explicit argument and performs zero database
+  access), `tests/test_slice6_eval_routing.py` (51 tests). Modified:
+  `app/llm.py` (`_resolve_key` is strictly `settings.get("gemini")`, `os`
+  import removed; `TokenUsage`/`MeasuredResult` dataclasses;
+  `_extract_usage`/`_derive_thinking` called on every received response
+  before any status check; `generate_structured_with_usage` accumulates
+  usage across the two-shot retry; `generate_structured` becomes a thin
+  wrapper; `_call_gemini` sends the key only via the `x-goog-api-key`
+  header against a query-string-free `_url(model)`), `app/agent/
+  drafting.py` (`BANNED_FILLER_PHRASES` constant; `DraftResult.usage`;
+  `draft_outreach`'s new `model` parameter threaded to
+  `generate_structured_with_usage`, so it now calls that instead of
+  `generate_structured`), `app/models.py` (`EvalDimension`/`EvalRubric`/
+  `EvalResult`, the last enforcing score-equals-sum-of-dimensions),
+  `app/db.py` (`_add_column_if_missing` helper; idempotent
+  `workspace.paid_tier_enabled`/`draft.cost_breakdown_json`/
+  `draft.estimated_cost_microusd` migrations; the `eval` table
+  (`draft_id UNIQUE`); `get_paid_tier_enabled`/`set_paid_tier_enabled`;
+  atomic `create_draft_with_routing` writing the draft, its cost columns,
+  its eval row, and `draft.created`/`eval.scored`/routing-decision audit
+  rows in one transaction; `EvalAlreadyExists`; `get_eval_for_draft`;
+  `outreach_cost_summary`; `list_pending_drafts`/`list_pipeline_targets`
+  extended with LEFT JOINed eval/cost columns), `app/audit_banners.py`
+  (namespaced `eval.scored`/`routing.*` action constants and labels, an
+  `eval_detail` helper, and `ROUTING_ACTION_FOR` mapping routing_action ->
+  audit action, with `"default"` intentionally mapping to no audit row),
+  `app/main.py` (`create_draft` now resolves `paid_tier_enabled` once and
+  calls `routing.route_and_draft` then `db.create_draft_with_routing`;
+  `_cost_display`/`_eval_dimensions` helpers; Approvals/Pipeline/campaign-
+  detail routes pass eval score, cost display, and — on Approvals — a
+  running cost-per-outreach summary; Settings resolves/saves the paid-tier
+  opt-in), and four templates (`approvals.html` — cost summary strip, model/
+  eval/cost per draft card, an expandable rubric; `pipeline.html` — eval
+  score and cost per card; `campaign_detail.html` — eval score and cost per
+  row where a draft exists; `settings.html` — the paid-tier checkbox and a
+  corrected Gemini key hint with no `GEMINI_API_KEY` reference), plus new
+  `.cost-summary`/`.checkbox-field`/`.draft-card__meta`/`.pl-card__meta`/
+  `.target-cta-cost` CSS rules, all built from existing design tokens only.
+  One necessary, mechanical deviation beyond the plan's own file list:
+  `tests/test_slice4_drafting.py` (9 tests) had its Gemini-call mock target
+  changed from `app.agent.drafting.llm.generate_structured` to
+  `app.agent.drafting.llm.generate_structured_with_usage` (wrapping return
+  values in `llm.MeasuredResult`), since `draft_outreach` now calls the
+  latter directly to capture usage — every existing assertion and test
+  scenario is unchanged; only the mock plumbing was updated to match the
+  plan's own required internal call-site change. Without this, those nine
+  tests would have silently stopped exercising their mocks and made live,
+  unmocked HTTP calls to Gemini with a fake key during every test run
+  (confirmed empirically before the fix: the tests still passed by
+  accident on stale assertions while real "API key not valid" responses
+  came back from the real endpoint) — a violation of the no-live-call
+  testing discipline this fix restores.
+- Files or areas affected: `app/agent/eval.py` (new), `app/agent/
+  routing.py` (new), `app/llm.py`, `app/agent/drafting.py`, `app/models.py`,
+  `app/db.py`, `app/audit_banners.py`, `app/main.py`,
+  `app/templates/approvals.html`, `app/templates/pipeline.html`,
+  `app/templates/campaign_detail.html`, `app/templates/settings.html`,
+  `app/static/css/app.css`, `tests/test_slice6_eval_routing.py` (new),
+  `tests/test_slice4_drafting.py`, `PROGRESS.md`, `DECISIONS.md`,
+  `collaboration.md`, this file, and `docs/plans/completed/SLICE_6_PLAN.md`
+  (moved from `docs/plans/SLICE_6_PLAN.md` with an updated status header;
+  content otherwise unchanged). No `requirements.txt` change.
+- Verification: `python -m unittest discover -s tests` passes 263/263
+  (212 baseline + 51 new `test_slice6_eval_routing` tests), covering every
+  plan §6 acceptance criterion (1-32) plus heuristic-rubric boundary cases,
+  mocked at the `httpx.post`/`app.llm.generate_structured_with_usage`
+  boundary — no real provider call, no real key. `git diff --check` passed
+  (only pre-existing LF/CRLF autocrlf warnings, no errors). `git status`
+  confirmed only the files listed above changed; no `requirements.txt`,
+  seed, or unrelated file was touched. A credential-pattern scan
+  (API-key/token/private-key regexes) over the complete diff found no
+  matches; two synthetic test fixture strings that superficially resembled
+  a Stripe-style `sk-` key prefix were renamed to unambiguous placeholders
+  before this scan to avoid a future automated secret-scanner false
+  positive. Live-verified against the real `outpost.db` in the correct
+  working tree (not a script, not the owner's data touched destructively):
+  started `uvicorn` on port 8010, created one new workspace ("Slice 6 UI
+  Verify"), ran a business campaign end to end with zero keys configured
+  (heuristic drafting/eval path), and confirmed via `curl` that Settings
+  renders the paid-tier checkbox, Approvals shows "Model: heuristic",
+  "Eval 100", "0 tokens (heuristic, no cost)", and a correct "~$0.0000"
+  cost-summary average; approved the draft and confirmed Pipeline shows the
+  same eval/cost figures; confirmed campaign detail shows the eval badge,
+  cost line, and an Activity feed with "Draft evaluated"/"Draft created"
+  (and correctly no "Routed..." row, since the no-key path's routing_action
+  is `"default"`, which writes no extra audit row by design). No errors in
+  the server log across this flow. This new workspace was left in place as
+  normal product usage, matching the precedent set by Slice 2's and Slice
+  5's own verification sessions (never reset/deleted). No live or paid
+  Gemini/Apollo/Apify/YouTube call was made or authorized.
+- Last known working state: `codex/sde-1-slice-2-hardening`, working tree
+  clean except for the Slice 6 changes described above, ready to commit.
+  All 263 tests pass.
+- Known limitations: `ESCALATION_MODEL` is owner-gated and unset — the
+  escalation tier is fully implemented and mocked-tested but dormant, and
+  Slice 6 is not marked complete against `SPEC.md` §6 until the owner
+  approves a specific stronger Gemini model id and it passes a safe,
+  bounded live verification gate (no paid live verification was performed
+  or authorized this session). The `thoughtsTokenCount`-derivation rule in
+  `app/llm.py`'s `_derive_thinking` remains this plan's own interpretation,
+  unconfirmed against a real Gemini response. The LLM judge always runs on
+  the default model, never the escalation model, per plan §5.3. Re-
+  evaluating a human-edited draft body remains out of scope (SPEC.md §4.8).
+- Next action: Owner review of this implementation. If/when the owner
+  wants the escalation tier active, approve a specific stronger Gemini
+  model id so it can be safely, boundedly verified per the completed
+  plan's §6 "Safe live verification," then Slice 6 can be marked complete
+  against `SPEC.md`.

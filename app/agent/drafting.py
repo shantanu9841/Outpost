@@ -17,12 +17,27 @@ non-negotiable): _heuristic_draft never calls a model.
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from app import llm
 from app.models import Brief, OutreachDraft
 from app.sources.base import DEFAULT_NAME
+
+# Reused, not reimplemented: app/agent/eval.py's heuristic non_genericness
+# dimension imports this constant rather than duplicating the phrase list, so
+# SYSTEM_PROMPT's prose and the heuristic's check can never silently drift
+# apart without a diff showing both. Lower-case; checked as a
+# case-insensitive substring match against the normalized body.
+BANNED_FILLER_PHRASES = (
+    "i love what you're doing",
+    "huge fan",
+    "reaching out",
+    "excited to connect",
+    "explore synergies",
+    "at its core",
+    "in today's landscape",
+)
 
 SYSTEM_PROMPT = """\
 You write one short outreach message from a business to a prospective partner
@@ -78,9 +93,10 @@ class DraftStatus(str, Enum):
 @dataclass
 class DraftResult:
     body: str
-    model_used: str  # GEMINI_MODEL on LLM_OK, "heuristic" otherwise
+    model_used: str  # the model that produced body on LLM_OK, "heuristic" otherwise
     status: DraftStatus
     reason: str | None  # sanitized, safe for audit; see module docstring
+    usage: list[llm.TokenUsage] = field(default_factory=list)
 
 
 def draft_outreach(
@@ -89,6 +105,7 @@ def draft_outreach(
     settings: dict[str, str],
     *,
     known_invalid_key_reason: str | None = None,
+    model: str = llm.GEMINI_MODEL,
 ) -> DraftResult:
     """Draft one outreach message for `target`.
 
@@ -99,8 +116,10 @@ def draft_outreach(
 
     `known_invalid_key_reason` mirrors scoring.score_batch's parameter — if a
     caller already knows this Gemini key is rejected, skip the live call.
-    Nothing in this slice's route sets it (drafting is the only model call on
-    its path), but the parameter keeps the shape uniform with intake/scoring.
+
+    `model` (Slice 6) lets app.agent.routing call this same function for the
+    escalation tier through the identical drafting/grounding logic — only the
+    model id sent to Gemini changes; heuristic behavior is unaffected.
     """
     if known_invalid_key_reason is not None:
         return DraftResult(
@@ -108,11 +127,12 @@ def draft_outreach(
             model_used="heuristic",
             status=DraftStatus.INVALID_GEMINI_KEY,
             reason=known_invalid_key_reason,
+            usage=[],
         )
 
     try:
-        draft = llm.generate_structured(
-            OutreachDraft, SYSTEM_PROMPT, _build_prompt(brief, target), settings
+        measured = llm.generate_structured_with_usage(
+            OutreachDraft, SYSTEM_PROMPT, _build_prompt(brief, target), settings, model=model
         )
     except llm.LLMError as exc:
         status = (
@@ -120,21 +140,26 @@ def draft_outreach(
             if exc.kind == llm.LLMErrorKind.INVALID_KEY
             else DraftStatus.GEMINI_ERROR
         )
-        return DraftResult(_heuristic_draft(brief, target).body, "heuristic", status, exc.message)
+        return DraftResult(
+            _heuristic_draft(brief, target).body, "heuristic", status, exc.message, usage=exc.usage
+        )
+
+    draft, usage = measured.value, measured.usage
 
     if draft is None:
         return DraftResult(
-            _heuristic_draft(brief, target).body, "heuristic", DraftStatus.NO_GEMINI_KEY, None
+            _heuristic_draft(brief, target).body, "heuristic", DraftStatus.NO_GEMINI_KEY, None, usage=usage
         )
 
     if _is_draft_grounded(draft, target):
-        return DraftResult(draft.body, llm.GEMINI_MODEL, DraftStatus.LLM_OK, None)
+        return DraftResult(draft.body, model, DraftStatus.LLM_OK, None, usage=usage)
 
     return DraftResult(
         _heuristic_draft(brief, target).body,
         "heuristic",
         DraftStatus.HEURISTIC_FALLBACK,
         "model draft did not pass the grounding check",
+        usage=usage,
     )
 
 

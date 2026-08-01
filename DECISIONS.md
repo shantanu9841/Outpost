@@ -20,7 +20,7 @@ When changing an active decision, stop for owner approval, update this index and
 | Apollo for B2B | Use Apollo's organization search for business targets, never LinkedIn scraping. |
 | Maintained API for creator data | Instagram and TikTok discovery use maintained Apify actors (`apify/instagram-scraper`, `clockworks/tiktok-scraper`), never a self-hosted scraper; YouTube's free Data API v3 is the free creator source. Actor ids and pricing were confirmed against official Apify/Google documentation on 2026-07-31 and are provider-controlled — re-verify before relying on a pricing figure. |
 | BYO-key and free/demo paths | The owner supplies workspace-scoped credentials. The builder incurs no provider cost, and zero-key workflows remain usable. |
-| Cost-aware routing | Slice 6 will route work using measured quality/cost signals; `draft.cost_tokens` is already reserved for this. |
+| Cost-aware routing | Implemented in Slice 6: `app.agent.routing.route_and_draft` drafts with the default model or zero-key heuristic, escalates to a stronger paid tier only when workspace key + explicit opt-in + high fit all hold, and is a pure function of its arguments (no database access). The stronger model id (`ESCALATION_MODEL`) and its pricing remain owner-gated and unset — see `PROGRESS.md`'s "Owner-gated" section. |
 | Human approval before send | Drafting and approval are separate. Nothing transmits automatically; every human/agent action is audited. |
 | Local-first stack | Python, FastAPI, SQLite, server-rendered HTML, and light vanilla JavaScript remain the default. |
 | Locked design system | `design.md` tokens and components govern UI work; support light and dark themes. |
@@ -51,7 +51,11 @@ When changing an active decision, stop for owner approval, update this index and
 | Creator routing is deterministic priority, not aggregation | Creator discovery selects exactly one live source: Apify when configured, else YouTube when configured, else creator seed. Apify and YouTube are never combined in one campaign. |
 | `PARTIAL_RESULTS` is a success, not a fallback trigger | Apify's dual-actor merge can succeed on one platform and fail on the other; `discover()` keeps those candidates (with a warning naming the failed platform) rather than discarding them for seed data. |
 | Apify precedence on dual sub-source failure | When Instagram and TikTok fail with different statuses, the reported status follows `INVALID_KEY > INSUFFICIENT_PLAN > RATE_LIMITED > PROVIDER_ERROR > NETWORK_ERROR`; the combined reason always names both platforms. |
-| Header-only provider authentication | Apify (`Authorization: Bearer`) and YouTube (`X-goog-api-key`) send credentials only as request headers, never as URL query parameters, so no request URL is ever credential-bearing. |
+| Header-only provider authentication | Apify (`Authorization: Bearer`), YouTube (`X-goog-api-key`), and Gemini (`x-goog-api-key`, Slice 6) send credentials only as request headers, never as URL query parameters, so no request URL is ever credential-bearing. Gemini's key moved off the `?key=` query parameter in Slice 6. |
+| Workspace-key-only Gemini, no environment fallback | `app/llm.py` resolves the Gemini key strictly from `settings.get("gemini")`; there is no `GEMINI_API_KEY` environment fallback anywhere (Slice 6 removed the one that existed since Slice 2). A key present only in the process environment can never trigger drafting, evaluation, or escalation for a workspace that hasn't pasted its own. |
+| Every issued Gemini attempt is accounted for | `llm._extract_usage` runs on every response `_call_gemini` receives — success or failure — producing one `TokenUsage` record each time; only "no Gemini request was ever issued" (no workspace key) is a genuinely empty usage list. `cost_tokens`/`estimated_cost_microusd` are `NULL` (unknown) whenever any issued attempt's usage or pricing is unreadable, `0` (known) only when no request was issued at all. |
+| Decimal cost accounting, one final rounding | Per-attempt cost contributions use `Decimal` rates constructed from strings, priced at that attempt's own model's rate; every exact contribution is summed first and rounded exactly once (`ROUND_HALF_UP`) to integer micro-USD. No binary floats, no per-attempt or per-component rounding. |
+| Invalid Gemini credentials are terminal per routing operation | The first `INVALID_GEMINI_KEY` outcome at default draft, default eval, escalated draft, or escalated eval stops every later Gemini call in that `route_and_draft` invocation, while preserving usage already collected and completing through the plan-defined grounded fallback. |
 | Apify start-run + bounded polling, never `run-sync` | Every Apify run is started, polled at a fixed interval up to a wall-clock budget, then fetched — each step under its own per-request timeout, plus named `timeout`/`maxItems`/`maxTotalChargeUsd` caps on the run itself. |
 | `evidence_for` dispatches seed by `target_type` | Seed data serves both business and creator rows under `source_used == "seed"`; the registry entry for `"seed"` is itself keyed by `target_type` so the two evidence shapes cannot collide. |
 | Controlled `_outpost_platform` provenance | Every creator source sets this marker on `Candidate.raw` from its own constant, never from an untrusted provider field. `target.source` stays the source-level value; the marker alone carries Instagram/TikTok/YouTube identity through persistence to the UI. |
@@ -91,11 +95,26 @@ When changing an active decision, stop for owner approval, update this index and
 | Terminal stages | `live` and `declined` are terminal in the current slice; same-stage requests are no-ops with no audit row. |
 | Nothing sends | Approval and `contacted` are stored workflow state only. No outbound messaging integration exists. |
 
+## Evaluation and cost-aware routing
+
+| Active decision | Constraint |
+|---|---|
+| Exactly one eval per draft | `eval.draft_id INTEGER NOT NULL UNIQUE REFERENCES draft(id)` enforces this at the database level, not only in application code. |
+| LLM-judge eval with a deterministic fallback | An LLM judge scores the four-dimension rubric (personalization, specificity, non-genericness, clear ask) when a Gemini key is present and not already known-rejected; a fully-specified heuristic (§4.5 of the completed plan) runs otherwise and produces the identical `EvalResult` shape. |
+| The judge never escalates | `eval.evaluate_draft` always runs on the default model; only drafting escalates to `ESCALATION_MODEL`. |
+| Escalation eligibility is fully explicit | Escalation requires, together: the workspace's own `gemini` key, an explicit `workspace.paid_tier_enabled` opt-in (default off), `target.fit_score >= HIGH_FIT_THRESHOLD` (85, inclusive), and `ESCALATION_MODEL is not None`. Any missing condition keeps the default-tier result; the eligible-but-`ESCALATION_MODEL is None` case is explicitly audited (`routing.escalation_unavailable`), never silent. |
+| Confidence early-exit | An eligible target whose default-model eval score is `>= CONFIDENCE_THRESHOLD` (80, inclusive) keeps the default draft rather than escalating. |
+| `routing.py` is a pure function | `route_and_draft(brief, target, settings, *, paid_tier_enabled)` performs no database access; `main.py`'s `create_draft` resolves the workspace-scoped `paid_tier_enabled` once, before calling it. |
+| Atomic routed-draft creation | `db.create_draft_with_routing` writes the draft (with its cost columns), its eval row, and every required audit row (`draft.created`, `eval.scored`, plus a routing-decision row when one applies) in one transaction. |
+| "Default model," never "free" | UI and audit copy say "default model" and "estimated paid list-price cost," never "free model" or that provider usage is free — the only genuinely zero-cost state is no `gemini` key at all. |
+
 ## Schema commitments
 
 - `audit.campaign_id`, `audit.target_id`, and `audit.draft_id` support traceable actions.
 - `target.fit_score`, `target.fit_reasons_json`, and `target.stage` are the persisted scoring/pipeline fields.
-- `draft` stores original and edited body, status, model, creation time, and future `cost_tokens`.
+- `draft` stores original and edited body, status, model, creation time, `cost_tokens`, `cost_breakdown_json`, and `estimated_cost_microusd` (the latter three populated by Slice 6's `create_draft_with_routing`).
+- `eval` (Slice 6) stores one rubric/score row per draft, `draft_id` unique.
+- `workspace.paid_tier_enabled` (Slice 6) is an idempotently migrated boolean column, default off.
 - New tables and migrations must remain idempotent and preserve existing local rows.
 
 ## When to read detailed history

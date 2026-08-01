@@ -136,3 +136,62 @@ class OutreachDraft(BaseModel):
     @classmethod
     def body_is_reasonable(cls, v: str) -> str:
         return validate_draft_body(v)
+
+
+class EvalDimension(BaseModel):
+    """One 0-25 dimension of a draft's rubric score, LLM-judged or heuristic.
+
+    Both paths produce this exact shape (app/agent/eval.py's module
+    docstring) so a rendered EvalResult reads identically regardless of
+    which one produced it.
+    """
+
+    points: int
+    justification: str
+
+    @field_validator("points")
+    @classmethod
+    def in_range(cls, v: int) -> int:
+        if not 0 <= v <= 25:
+            raise ValueError("points must be between 0 and 25")
+        return v
+
+    @field_validator("justification")
+    @classmethod
+    def not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("justification is required")
+        return v
+
+
+class EvalRubric(BaseModel):
+    """The four rubric dimensions SPEC.md §4.8 names: personalization,
+    specificity, non-genericness, and a clear ask."""
+
+    personalization: EvalDimension
+    specificity: EvalDimension
+    non_genericness: EvalDimension
+    clear_ask: EvalDimension
+
+
+class EvalResult(BaseModel):
+    """One draft's eval score: the rubric plus the total it must sum to.
+
+    The model_validator is the same "schema shape isn't enough, check the
+    claim" discipline FitAssessment uses for citations — a model (or a bug
+    in the heuristic) could return dimension points that don't actually add
+    up to score; this makes that impossible to persist.
+    """
+
+    rubric: EvalRubric
+    score: int  # 0-100
+
+    @model_validator(mode="after")
+    def score_matches_sum(self) -> "EvalResult":
+        total = (
+            self.rubric.personalization.points + self.rubric.specificity.points
+            + self.rubric.non_genericness.points + self.rubric.clear_ask.points
+        )
+        if self.score != total:
+            raise ValueError("score must equal the sum of the four dimensions' points")
+        return self
