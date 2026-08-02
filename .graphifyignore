@@ -1,0 +1,15 @@
+# Keep the architecture map focused on production behavior.
+tests/
+seeds/
+docs/history/
+docs/plans/
+docs/images/
+Outpost Design System/
+
+# Internal build and handoff documents are useful to humans but would dominate
+# a semantic graph without improving the product architecture map.
+CLAUDE.md
+collaboration.md
+PROGRESS.md
+DECISIONS.md
+design.md
