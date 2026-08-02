@@ -1,0 +1,68 @@
+name: Graphify architecture exploration
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/graphify.yml"
+      - ".graphifyignore"
+      - "app/**"
+      - "README.md"
+      - "SPEC.md"
+      - "docs/DECISIONS-2.0.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: graphify-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-code-map:
+    name: Build code architecture map
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out Outpost
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned Graphify
+        run: |
+          uv tool install graphifyy==0.9.32
+          graphify --version
+
+      - name: Extract local code graph
+        run: graphify extract . --code-only --timing
+
+      - name: Build report and community structure
+        run: graphify cluster-only . --no-label --timing
+
+      - name: Export interactive views
+        run: |
+          graphify export html --graph graphify-out/graph.json
+          graphify export callflow-html --output graphify-out/outpost-callflow.html
+
+      - name: Verify outputs
+        run: |
+          test -s graphify-out/graph.json
+          test -s graphify-out/GRAPH_REPORT.md
+          test -s graphify-out/graph.html
+          test -s graphify-out/outpost-callflow.html
+          ls -lh graphify-out/graph.json graphify-out/GRAPH_REPORT.md graphify-out/graph.html graphify-out/outpost-callflow.html
+
+      - name: Upload exploration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: outpost-graphify-code-map
+          path: graphify-out/
+          if-no-files-found: error
+          retention-days: 14
